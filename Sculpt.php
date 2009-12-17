@@ -31,32 +31,67 @@ use PDO;
 use PDOException;
 use DateTime;
 
-function connect($dsn) {
-  Sculpt::$connection = MySQLConnection::connect($dsn);
-}
-
-function connection() {
-  return Sculpt::$connection;
-}
-
 function is_assoc($var) {
   return is_array($var) && array_diff_key($var, array_keys(array_keys($var)));
 }
 
-# Configuration happens here:
-#
-#   Sculpt::$logger = $my_logger;
-#
-class Sculpt {
+class Connections {
 
-  public static $per_page = 10;
+  private static $default = null;
 
-  public static $connection;
+  private static $details = array();
 
-  public static $logger;
+  private static $pool = array();
+
+  public static function add($name, $details) {
+    if(isset(self::$details[$name]))
+      throw new Exception("connection already defined: $name");
+    if(!isset($details['adapter']))
+      throw new Exception("missing required connection option adapter: $name");
+    self::$details[$name] = $details;
+  }
+
+  public static function add_by_ini_file($ini_path) {
+    $ini = parse_ini_file($ini_path, true);
+    foreach($ini as $name => $details)
+      self::add($name, $details);
+  }
+
+  public static function set_default($name) {
+    if(!isset(self::$details[$name]))
+      throw new Exception("could not find a connection named: $name");
+    self::$default = $name;
+  }
+
+  public static function get($name = null) {
+
+    if(is_null($name)) {
+      if(is_null(self::$default))
+        throw new Exception('unable to connect: no default connection name');
+      $name = self::$default;
+    }
+
+    if(!isset(self::$pool[$name])) {
+      if(!isset(self::$details[$name]))
+        throw new Exception("unable to connect, no connection named: $name");
+      self::$pool[$name] = Connection::build(self::$details[$name]);
+    }
+
+    return self::$pool[$name];
+      
+  }
+
+}
+
+class Logger {
+
+  private static $logger;
+
+  public static function set_logger($logger) {
+    self::$logger = $logger;
+  }
 
   public static function log($query, $seconds) {
-    # TODO : allow toggling color on / off
     if(self::$logger) {
       static $i = 0;
       static $colors = array("\x1b[36m","\x1b[35m");
@@ -90,47 +125,31 @@ class Sculpt {
 
 ### connection classes
 
-abstract class AbstractConnection {
+abstract class Connection {
 
   protected $c;
 
-  public static function connect($dsn) {
-
-    $url = @parse_url($dsn);
-
-    if(!isset($url['host'])) {
-      $msg = 'Database host must be specified in the connection string.';
-      throw new Exception($msg);
+  public static function build($details) {
+    switch($details['adapter']) {
+      case 'mysql':
+        return new MySQLConnection($details);
+      default:
+        throw new Exception("unknown connection adapter {$details['adapter']}");
     }
-
-    $info = new \stdClass();
-    $info->protocol = $url['scheme'];
-    $info->host     = $url['host'];
-    $info->db       = isset($url['path']) ? substr($url['path'],1) : null;
-    $info->user     = isset($url['user']) ? $url['user'] : null;
-    $info->pass     = isset($url['pass']) ? $url['pass'] : null;
-
-    if(isset($url['port']))
-      $info->port = $url['port'];
-
-    return new MySQLConnection($info);
   }
 
-  protected function __construct($info) {
-
-    $dsn = "$info->protocol:host=$info->host" . 
-      (isset($info->port) ? ";port=$info->port" : '') .	
-      ";dbname=$info->db";
-
+  protected function __construct($details) {
+    $dsn = $details['dsn'];
+    $username = isset($details['username']) ? $details['username'] : null;
+    $password = isset($details['password']) ? $details['password'] : null;
     $opts = array(
       PDO::ATTR_CASE => PDO::CASE_LOWER,
       PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
       PDO::ATTR_ORACLE_NULLS => PDO::NULL_NATURAL,
       PDO::ATTR_STRINGIFY_FETCHES  => false,
+      PDO::ATTR_PERSISTENT => false,
     );
-
-    $this->c = new PDO($dsn, $info->user, $info->pass, $opts);
-
+    $this->c = new PDO($dsn, $username, $password, $opts);
   } 
 
   public function query($sql, &$values = array()) {
@@ -146,7 +165,7 @@ abstract class AbstractConnection {
     } catch(PDOException $e) {
       throw new Exception("EXECUTE FAILED: $sql");
     }
-    Sculpt::log($sql, microtime(true) - $start);
+    Logger::log($sql, microtime(true) - $start);
     return $sth;
   }
 
@@ -201,7 +220,7 @@ abstract class AbstractColumn {
 
 }
 
-class MySQLConnection extends AbstractConnection {
+class MySQLConnection extends Connection {
 
   public function quote_name($name) {
     return "`$name`";
@@ -338,8 +357,7 @@ class Table {
     
     $this->class = $class;
 
-    # TODO : just a temporary hack, make this better
-    $this->connection = connection();
+    $this->connection = Connections::get($class::$connection);
 
     $this->name = isset($class::$table_name) ?
       $class::$table_name :
@@ -582,6 +600,8 @@ class Scope {
     #??? not_blank
 
     throw new Exception("unknown scope $class::$method");
+
+    return $this;
   }
 
   protected function apply_static_scope($static_scope) {
@@ -613,7 +633,7 @@ class Scope {
   public function paginate($page, $per_page = null) {
     # TODO : grab default per_page from a configuration
     if(is_null($per_page))
-      $per_page = Sculpt::$per_page;
+      $per_page = Collection::$defaultper_page;
     $this->limit($per_page)->offset(($page - 1) * $per_page);
     $objects = $this->all();
     return $objects;
@@ -625,6 +645,8 @@ class Scope {
 }
 
 class Collection {
+
+  public static $default_per_page = 10;
 
   public $page;
   public $per_page;
@@ -646,6 +668,8 @@ class Collection {
 ### models
 
 abstract class Model {
+
+  static $connection = null;
 
   static $attr_accessors = array();
   static $attr_whitelist = array();
