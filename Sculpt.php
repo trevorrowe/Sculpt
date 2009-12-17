@@ -1,13 +1,17 @@
 <?php
 
 /**
+ * Sculpt
+ *
+ * A PHP ORM.
+ *
  * Copyright (c) 2009 Trevor Rowe
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
+ * of this software and associated documentation files (the "Software"), to 
+ * deal in the Software without restriction, including without limitation the 
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or 
+ * sell copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
  *
  * The above copyright notice and this permission notice shall be included in
@@ -17,13 +21,15 @@
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
  * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- * THE SOFTWARE.
- * 
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
+ * DEALINGS IN THE SOFTWARE.
+ *
+ * @author Trevor Rowe
+ * @package Sculpt
+ * @version 0.1
+ *
  */
-
-# TODO : 0, '0', false, /false/i, /no/i should all evaluate to false
 
 namespace Sculpt;
 
@@ -31,58 +37,19 @@ use PDO;
 use PDOException;
 use DateTime;
 
-function is_assoc($var) {
-  return is_array($var) && array_diff_key($var, array_keys(array_keys($var)));
+/**
+ * Returns true if the argument is an associative array (hash).
+ *
+ * @param array $array the array to test
+ * @return boolean 
+ */
+function is_assoc($array) {
+  return is_array($array) && array_diff_key($array, array_keys(array_keys($array)));
 }
 
-class Connections {
-
-  private static $default = null;
-
-  private static $details = array();
-
-  private static $pool = array();
-
-  public static function add($name, $details) {
-    if(isset(self::$details[$name]))
-      throw new Exception("connection already defined: $name");
-    if(!isset($details['adapter']))
-      throw new Exception("missing required connection option adapter: $name");
-    self::$details[$name] = $details;
-  }
-
-  public static function add_by_ini_file($ini_path) {
-    $ini = parse_ini_file($ini_path, true);
-    foreach($ini as $name => $details)
-      self::add($name, $details);
-  }
-
-  public static function set_default($name) {
-    if(!isset(self::$details[$name]))
-      throw new Exception("could not find a connection named: $name");
-    self::$default = $name;
-  }
-
-  public static function get($name = null) {
-
-    if(is_null($name)) {
-      if(is_null(self::$default))
-        throw new Exception('unable to connect: no default connection name');
-      $name = self::$default;
-    }
-
-    if(!isset(self::$pool[$name])) {
-      if(!isset(self::$details[$name]))
-        throw new Exception("unable to connect, no connection named: $name");
-      self::$pool[$name] = Connection::build(self::$details[$name]);
-    }
-
-    return self::$pool[$name];
-      
-  }
-
-}
-
+/**
+ * @package Sculpt
+ */
 class Logger {
 
   private static $logger;
@@ -123,11 +90,56 @@ class Logger {
 
 }
 
-### connection classes
-
+/**
+ * @package Sculpt
+ */
 abstract class Connection {
 
+  private static $default = null;
+
+  private static $details = array();
+
+  private static $pool = array();
+
   protected $c;
+
+  public static function add($name, $details) {
+    if(isset(self::$details[$name]))
+      throw new Exception("connection already defined: $name");
+    if(!isset($details['adapter']))
+      throw new Exception("missing required connection option adapter: $name");
+    self::$details[$name] = $details;
+  }
+
+  public static function load_ini_file($ini_path) {
+    $ini = parse_ini_file($ini_path, true);
+    foreach($ini as $name => $details)
+      self::add($name, $details);
+  }
+
+  public static function set_default($name) {
+    if(!isset(self::$details[$name]))
+      throw new Exception("could not find a connection named: $name");
+    self::$default = $name;
+  }
+
+  public static function get($name = null) {
+
+    if(is_null($name)) {
+      if(is_null(self::$default))
+        throw new Exception('unable to connect: no default connection name');
+      $name = self::$default;
+    }
+
+    if(!isset(self::$pool[$name])) {
+      if(!isset(self::$details[$name]))
+        throw new Exception("unable to connect, no connection named: $name");
+      self::$pool[$name] = Connection::build(self::$details[$name]);
+    }
+
+    return self::$pool[$name];
+      
+  }
 
   public static function build($details) {
     switch($details['adapter']) {
@@ -179,7 +191,10 @@ abstract class Connection {
 
 }
 
-abstract class AbstractColumn {
+/**
+ * @package Sculpt
+ */
+abstract class Column {
 
   const STRING   = 1;
   const INTEGER  = 2;
@@ -220,6 +235,9 @@ abstract class AbstractColumn {
 
 }
 
+/**
+ * @package Sculpt
+ */
 class MySQLConnection extends Connection {
 
   public function quote_name($name) {
@@ -246,7 +264,10 @@ class MySQLConnection extends Connection {
 
 }
 
-class MySQLColumn extends AbstractColumn {
+/**
+ * @package Sculpt
+ */
+class MySQLColumn extends Column {
 
   protected $name;
 
@@ -305,16 +326,23 @@ class MySQLColumn extends AbstractColumn {
 
 }
 
-### Exceptions
-
+/**
+ * @package Sculpt
+ */
 class Exception extends \Exception {}
 
+/**
+ * @package Sculpt
+ */
 class RecordInvalidException extends Exception {
   public function __construct($obj) {
     parent::__construct("Validation failed: $obj->errors");
   }
 }
 
+/**
+ * @package Sculpt
+ */
 class NonExistantAttributeException extends Exception {
   public function __construct($class, $attr_name) {
     $msg = "$class class: undefined attribute setter called: $attr_name";
@@ -322,6 +350,9 @@ class NonExistantAttributeException extends Exception {
   }
 }
 
+/**
+ * @package Sculpt
+ */
 class NonWhitelistedAttributeBulkAssigned extends Exception {
   public function __construct($class, $attr_name) {
     $msg = "$class class: non-whitelisted attribute `$attr_name` bulk assigned";
@@ -329,6 +360,9 @@ class NonWhitelistedAttributeBulkAssigned extends Exception {
   }
 }
 
+/**
+ * @package Sculpt
+ */
 class BlacklistedAttributeBulkAssigned extends Exception {
   public function __construct($class, $attr_name) {
     $msg = "$class class: blacklisted attribute `$attr_name` bulk assigned";
@@ -336,8 +370,9 @@ class BlacklistedAttributeBulkAssigned extends Exception {
   }
 }
 
-### tables
-
+/**
+ * @package Sculpt
+ */
 class Table {
 
   private static $cache = array();
@@ -357,7 +392,7 @@ class Table {
     
     $this->class = $class;
 
-    $this->connection = Connections::get($class::$connection);
+    $this->connection = Connection::get($class::$connection);
 
     $this->name = isset($class::$table_name) ?
       $class::$table_name :
@@ -463,6 +498,9 @@ class Table {
 
 }
 
+/**
+ * @package Sculpt
+ */
 class Scope {
 
   private $table;
@@ -644,6 +682,9 @@ class Scope {
 
 }
 
+/**
+ * @package Sculpt
+ */
 class Collection {
 
   public static $default_per_page = 10;
@@ -665,8 +706,9 @@ class Collection {
 
 }
 
-### models
-
+/**
+ * @package Sculpt
+ */
 abstract class Model {
 
   static $connection = null;
@@ -840,8 +882,6 @@ abstract class Model {
     return $this->_get('id');
   }
 
-  ### class methods
-
   # returns a scope
   public static function find($opts = array()) {
     return new Scope(Table::get(get_called_class()));
@@ -867,8 +907,9 @@ abstract class Model {
 
 }
 
-### Errors
-
+/**
+ * @package Sculpt
+ */
 class Errors {
 
   protected $msgs = array();
