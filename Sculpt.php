@@ -58,17 +58,24 @@ class Logger {
     self::$logger = $logger;
   }
 
-  public static function log($query, $seconds) {
+  public static function log($query, $seconds, $values) {
     if(self::$logger) {
+
       static $i = 0;
       static $colors = array("\x1b[36m","\x1b[35m");
       static $weights = array("\x1b[1m", '');
+
       $reset = "\x1b[0m";
       $bold = "\x1b[1m";
       $color = $colors[$i % 2];
       $weight = $weights[$i % 2];
       $time = self::format_seconds($seconds);
-      $msg = "$color{$bold}[Sculpt] ($time)$reset$weight $query$reset";
+
+      $vals = '';
+      if(!empty($values))
+        $vals = ' [' . implode(', ', $values) . ']';
+
+      $msg = "$color{$bold}[Sculpt] ($time)$reset$weight $query$reset$vals";
       self::$logger->log($msg);
       $i += 1;
     }
@@ -177,7 +184,8 @@ abstract class Connection {
     } catch(PDOException $e) {
       throw new Exception("EXECUTE FAILED: $sql");
     }
-    Logger::log($sql, microtime(true) - $start);
+
+    Logger::log($sql, microtime(true) - $start, $values);
     return $sth;
   }
 
@@ -330,6 +338,15 @@ class MySQLColumn extends Column {
  * @package Sculpt
  */
 class Exception extends \Exception {}
+
+/**
+ * @package Sculpt
+ */
+class RecordNotFoundException extends Exception {
+  public function __construct($scope) {
+    parent::__construct('record not found');
+  }
+}
 
 /**
  * @package Sculpt
@@ -573,7 +590,14 @@ class Scope {
     return $this;
   }
 
+  public function find($opts = array()) {
+    $this->apply_static_scope($opts);
+    return $this;
+  }
+
   public function __get($scope) {
+    if(in_array($scope, array('all', 'first', 'get')))
+      return $this->$scope();
     $this->$scope();
     return $this;
   }
@@ -609,35 +633,76 @@ class Scope {
     if(preg_match($regex, $method, $matches)) {
       $col = $matches[1];
       switch($matches[2]) {
-        case 'equals':
         case 'is':
+        case 'equals':
           $this->where("$col = ?", $args[0]);
           return $this;
-          break;
-        case 'does_not_equal':
-        case 'not_equal_to':
         case 'is_not':
+        case 'not_equal':
+        case 'not_equal_to':
+        case 'does_not_equal':
+          $this->where("$col != ?", $args[0]);
+          return $this;
+        case 'begins_with':
+          $this->where("$col LIKE ?", "{$args[0]}%");
+          return $this;
+        case 'not_begin_with':
+          $this->where("$col NOT LIKE ?", "{$args[0]}%");
+          return $this;
+        case 'ends_with':
+          $this->where("$col LIKE ?", "%{$args[0]}");
+          return $this;
+        case 'not_end_with':
+        case 'not_ends_with':
+        case 'not_ending_with':
+          $this->where("$col NOT LIKE ?", "%{$args[0]}");
+          return $this;
+        case 'like':
+          $this->where("$col LIKE ?", "%{$args[0]}%");
+          return $this;
+        case 'not_like':
+          $this->where("$col NOT LIKE ?", "%{$args[0]}%");
+          return $this;
+        case 'gt':
+        case 'greater':
+        case 'greater_than':
+          $this->where("$col > ?", $args[0]);
+          return $this;
+        case 'gte':
+        case 'greater_than_or_equal':
+        case 'greater_than_or_equal_to':
+          $this->where("$col >= ?", $args[0]);
+          return $this;
+        case 'lt':
+        case 'less':
+        case 'less_than':
+          $this->where("$col < ?", $args[0]);
+          return $this;
+        case 'lte':
+        case 'less_than_or_equal':
+        case 'less_than_or_equal_to':
+          $this->where("$col <= ?", $args[0]);
+          return $this;
+        case 'null':
+        case 'is_null':
+          $this->where("$col IS NULL");
+          return $this;
+        case 'not_null':
+        case 'is_not_null':
+          $this->where("$col IS NOT NULL");
+          return $this;
+        case 'blank':
+        case 'is_blank':
+          $this->where("$col IS NULL OR $col = ''");
+          return $this;
+        case 'not_blank':
+        case 'is_not_blank':
+          $this->where("$col IS NOT NULL AND $col != ''");
+          return $this;
       }
     }
 
-    #equals, is
-    #does_not_equal, is_not
-    #begins_with
-    #not_begin_with
-    #end_with
-    #not_end_with
-    #like
-    #no_like
-    #greater_than
-    #greater_than_or_equal_to
-    #less_than
-    #less_than_or_equal_to
-    #null
-    #not_null
-    #blank
-    #??? not_blank
-
-    throw new Exception("unknown scope $class::$method");
+    throw new Exception("undefine scope $class::$method");
 
     return $this;
   }
@@ -650,17 +715,23 @@ class Scope {
         $this->$key($value);
   }
 
-  #public function get() {
-  #  $obj = $this->first();
-  #  if(is_null($obj))
-  #    throw new Exception("object not found");
-  #  return $obj;
-  #}
+  public function get($id = null) {
 
-  # TODO : public function count() {}
+    $scope = clone $this;
+
+    if(!is_null($id))
+      $scope->id_is($id);
+
+    $record = $scope->first();  
+    if(is_null($record))
+      throw new RecordNotFoundException($scope);
+
+    return $record;
+  }
 
   public function first() {
-    $results = $this->limit(1)->all();
+    $scope = clone $this;
+    $results = $scope->limit(1)->all();
     return empty($results) ? null : $results[0];
   }
 
@@ -668,24 +739,35 @@ class Scope {
     return $this->table->select($this->sql_parts);
   }
 
-  public function paginate($page, $per_page = null) {
-    # TODO : grab default per_page from a configuration
+  public function paginate($page = null, $per_page = null) {
+
+    if(is_null($page))
+      $page = 1;
+
     if(is_null($per_page))
-      $per_page = Collection::$defaultper_page;
-    $this->limit($per_page)->offset(($page - 1) * $per_page);
-    $objects = $this->all();
-    return $objects;
+      $per_page = Collection::$default_per_page;
+
+    $total = $this->count();
+
+    $scope = clone $this;
+    $scope->limit($per_page)->offset(($page - 1) * $per_page);
+    $objects = $scope->all();
+
+    return new Collection($page, $per_page, $total, $objects);
   }
 
-  # TODO : public function each($callback) {}
-  # TODO : public function batch($callback, $size = 500) {}
+  public function count() {
+    $scope = clone $this;
+    $scope->select('COUNT(*) AS count');
+    return $scope->first()->count;
+  }
 
 }
 
 /**
  * @package Sculpt
  */
-class Collection {
+class Collection implements \Iterator, \Countable, \ArrayAccess {
 
   public static $default_per_page = 10;
 
@@ -694,22 +776,65 @@ class Collection {
   public $total;
 
   private $objects;
+  private $position = 0;
 
-  public function __construct($objects, $page, $per_page, $total) {
+  public function __construct($page, $per_page, $total, $objects) {
     $this->objects = $objects;
     $this->page = $page;
     $this->per_page = $per_page;
     $this->total = $total;
   }
 
-  # TODO : implement iterator interface
+  public function rewind() {
+    $this->position = 0;
+  }
+
+  public function current() {
+    return $this->objects[$this->position];
+  }
+
+  public function key() {
+    return $this->position;
+  }
+
+  public function next() {
+    $this->position += 1;
+  }
+
+  public function valid() {
+    return isset($this->objects[$this->position]);
+  }
+
+  public function offsetExists($offset) {
+    return isset($this->objects[$offset]);
+  }
+
+  public function offsetSet($offset, $value) {
+    throw new Exception(__CLASS__ . ' is inmutable');
+  }
+
+  public function offsetGet($offset) {
+    return $this->objects[$offset];
+  }
+
+  public function offsetUnset($offset) {
+    throw new Exception(__CLASS__ . ' is inmutable');
+  }
+
+  public function count() {
+    return $this->total;
+  }
+
+  public function total() {
+    return $this->total;
+  }
 
 }
 
 /**
  * @package Sculpt
  */
-abstract class Model {
+abstract class Model implements \ArrayAccess {
 
   static $connection = null;
 
@@ -760,6 +885,26 @@ abstract class Model {
     $this->set_attribute($attr_name, $attr_value);
   }
 
+  public function __isset($attr_name) {
+    return !is_null($this->attribute($attr_name));
+  }
+
+  public function offsetExists($attr_name) {
+    return isset($this->$attr_name);
+  }
+
+  public function offsetSet($attr_name, $attr_value) {
+    $this->set_attribute($attr_name, $attr_value);
+  }
+
+  public function offsetGet($attr_name) {
+    return $this->attribute($attr_name);
+  }
+
+  public function offsetUnset($attr_name) {
+    $this->set_attribute($attr_name, null);
+  }
+
   public function attribute_before_type_cast($name) {
     return $this->_get($name, false);
   }
@@ -781,7 +926,7 @@ abstract class Model {
   }
 
   protected function _get($name, $type_cast = true) {
-    $this->ensure_attr_defined($name);
+    #$this->ensure_attr_defined($name);
     $value = isset($this->attr[$name]) ? $this->attr[$name] : null;
     if(isset($this->table->columns[$name]) && $type_cast) {
       $value = $this->table->columns[$name]->cast($value);
@@ -790,20 +935,20 @@ abstract class Model {
   }
 
   protected function _set($name, $value) {
-    $this->ensure_attr_defined($name);
+    #$this->ensure_attr_defined($name);
     if(isset($this->table->columns[$name])) {
       # TODO : track changes for dirty tracking
     }
     $this->attr[$name] = $value;
   }
   
-  protected function ensure_attr_defined($name) {
-    if(!isset($this->table->columns[$name]) && 
-       !in_array($name, static::$attr_accessors)) 
-    {
-      throw new NonExistantAttributeException($this->class, $name);
-    }
-  }
+  #protected function ensure_attr_defined($name) {
+  #  if(!isset($this->table->columns[$name]) && 
+  #     !in_array($name, static::$attr_accessors)) 
+  #  {
+  #    throw new NonExistantAttributeException($this->class, $name);
+  #  }
+  #}
 
   protected function bulk_assign($attributes) {
     if(empty(static::$attr_whitelist) && empty(static::$attr_blacklist)) {
@@ -882,19 +1027,38 @@ abstract class Model {
     return $this->_get('id');
   }
 
-  # returns a scope
-  public static function find($opts = array()) {
+  public static function __callStatic($method, $args) {
+    $scope = static::scope();
+    call_user_func_array(array($scope, $method), $args);
+    return $scope;
+  }
+
+  public static function scope() {
     return new Scope(Table::get(get_called_class()));
   }
 
-  # TODO : allow this function to recieve an array of ids as well
-  public static function get($id) {
-    $scope = new Scope(Table::get(get_called_class()));
-    $obj = $scope->id_is($id)->first();
-    if(is_null($obj))
-      throw new Exception("exceptional find - didn't find it");
-    else
-      return $obj;
+  public static function get($id = null) {
+    return static::scope()->get($id);
+  }
+
+  public static function first() {
+    return static::scope()->first();
+  }
+
+  public static function all() {
+    return static::scope()->all();
+  }
+
+  public static function paginate($page, $per_page = null) {
+    return static::scope()->paginate($page, $per_page);
+  }
+
+  public static function count() {
+    return static::scope()->count();
+  }
+
+  public static function find($opts = array()) {
+    return static::scope()->find($opts);
   }
 
   public static function table_name() {
