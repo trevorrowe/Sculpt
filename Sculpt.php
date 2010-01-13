@@ -47,6 +47,13 @@ function is_assoc($array) {
   return is_array($array) && array_diff_key($array, array_keys(array_keys($array)));
 }
 
+function collect($array, $callback) {
+  $results = array();
+  foreach($array as $array_index => $array_element)
+    $results[] = $callback($array_element, $array_index);
+  return $results;
+}
+
 /**
  * @package Sculpt
  */
@@ -58,7 +65,7 @@ class Logger {
     self::$logger = $logger;
   }
 
-  public static function log($query, $seconds, $values) {
+  public static function log($query, $time, $values) {
     if(self::$logger) {
 
       static $i = 0;
@@ -69,7 +76,8 @@ class Logger {
       $bold = "\x1b[1m";
       $color = $colors[$i % 2];
       $weight = $weights[$i % 2];
-      $time = self::format_seconds($seconds);
+      if(is_numeric($time))
+        $time = self::format_seconds($time);
 
       $vals = '';
       if(!empty($values))
@@ -174,22 +182,22 @@ abstract class Connection {
   public function query($sql, &$values = array()) {
     $start = microtime(true);
     try {
-      $sth = $this->c->prepare($sql);
-    } catch(PDOException $e) {
-      throw new Exception("PREPARE FAILED: $sql");
-    }
-    $sth->setFetchMode(PDO::FETCH_ASSOC);
-    try {
-      $sth->execute($values);
-    } catch(PDOException $e) {
-      throw new Exception("EXECUTE FAILED: $sql");
-    }
 
-    Logger::log($sql, microtime(true) - $start, $values);
-    return $sth;
+      $sth = $this->c->prepare($sql);
+      $sth->setFetchMode(PDO::FETCH_ASSOC);
+      $sth->execute($values);
+
+      Logger::log($sql, microtime(true) - $start, $values);
+
+      return $sth;
+
+    } catch(\Exception $e) {
+      Logger::log($sql, 'FAILED', $values);
+      throw $e;
+    }
   }
 
-  public function insert_id($sequence = null) {
+  public function last_insert_id($sequence = null) {
     return $this->c->lastInsertId($sequence);
   }
   
@@ -360,9 +368,9 @@ class RecordInvalidException extends Exception {
 /**
  * @package Sculpt
  */
-class NonExistantAttributeException extends Exception {
+class UndefinedAttributeException extends Exception {
   public function __construct($class, $attr_name) {
-    $msg = "$class class: undefined attribute setter called: $attr_name";
+    $msg = "undefined attribute $class::$attr_name accessed";
     parent::__construct($msg);
   }
 }
@@ -420,17 +428,52 @@ class Table {
 
   }
 
+  public function insert($obj) {
+    $columns = array();
+    $bind_params = array(); 
+    foreach($obj->changed() as $attr) {
+      $columns[] = $attr;
+      $bind_params[] = $obj->attribute($attr);
+    }
+    $columns = implode(', ', $columns);
+    $placeholders = rtrim(str_repeat('?, ', count($bind_params)), ', ');
+    $sql = "INSERT INTO $this->name ($columns) VALUES ($placeholders)";
+    $sth = $this->connection->query($sql, $bind_params);
+    $obj->id = $this->connection->last_insert_id();
+  }
+
+  public function update($obj) {
+    $set = array();
+    $bind_params = array();
+    foreach($obj->changed() as $attr) {
+      $set[] = "$attr = ?";
+      $bind_params[] = $obj->attribute($attr);
+    }
+    $bind_params[] = $obj->id;
+    $set = implode(', ', $set);
+    $sql = "UPDATE $this->name SET $set WHERE id = ?";
+    $sth = $this->connection->query($sql, $bind_params);
+  }
+
+  public function delete($obj) {
+    $sql = "DELETE FROM $this->name WHERE id = ?";
+    $bind_params = array($obj->id);
+    $sth = $this->connection->query($sql, $bind_params);
+  }
+
   # TODO : move to the abstract connection classs?
+  # TODO : allow scopes to access the sql for thigns like count
   public function select($opts = array()) {
 
     $bind_params = array();
 
     $sql = $this->select_fragment($opts);
     $sql .= $this->from_fragment($opts);
-    $sql .= $this->where_fragment($opts, $bind_params);
 
-    #if(isset($parts['joins']))
-    #  $sql .= " WHERE {$parts['joins']}";
+    if(isset($parts['joins']))
+      $sql .= implode(', ', $parts['joins']);
+
+    $sql .= $this->where_fragment($opts, $bind_params);
 
     if(!empty($opts['group'])) {
       $sql .= " GROUP BY {$opts['group']}";
@@ -447,13 +490,7 @@ class Table {
     if(isset($opts['offset']))
       $sql .= " OFFSET {$opts['offset']}";
 
-    $objects = array();
-    $sth = $this->connection->query($sql, $bind_params);
-    $class = $this->class;
-    while($row = $sth->fetch()) {
-      $objects[] = $class::hydrate($row);
-    }
-    return $objects;
+    return $this->connection->query($sql, $bind_params);
   }
 
   private function select_fragment($opts) {
@@ -506,12 +543,6 @@ class Table {
     }
     return " WHERE " . implode(' AND ', $conditions);
   }
-
-  # TODO : public function insert() {}
-
-  # TODO : public function update() {}
-
-  # TODO : public function delete() {}
 
 }
 
@@ -643,6 +674,9 @@ class Scope {
         case 'does_not_equal':
           $this->where("$col != ?", $args[0]);
           return $this;
+        case 'is_exactly':
+          $this->where("$col = BINARY ?", $args[0]);
+          return $this;
         case 'begins_with':
           $this->where("$col LIKE ?", "{$args[0]}%");
           return $this;
@@ -736,7 +770,12 @@ class Scope {
   }
 
   public function all() {
-    return $this->table->select($this->sql_parts);
+    $sth = $this->table->select($this->sql_parts);
+    $class = $this->table->class;
+    $objects = array();
+    while($row = $sth->fetch())
+      $objects[] = $class::hydrate($row);
+    return $objects;
   }
 
   public function paginate($page = null, $per_page = null) {
@@ -747,11 +786,19 @@ class Scope {
     if(is_null($per_page))
       $per_page = Collection::$default_per_page;
 
-    $total = $this->count();
+    $limit = $per_page;
+    $offset = ($page - 1) * $per_page;
 
     $scope = clone $this;
-    $scope->limit($per_page)->offset(($page - 1) * $per_page);
-    $objects = $scope->all();
+    $objects = $scope->limit($limit)->offset($offset)->all();
+
+    $count = count($objects);
+    if($count == 0)
+      $total = $offset == 0 ? 0 : $this->count();
+    else if($count < $limit)
+      $total = count($objects) + $offset;
+    else
+      $total = $this->count();
 
     return new Collection($page, $per_page, $total, $objects);
   }
@@ -759,7 +806,9 @@ class Scope {
   public function count() {
     $scope = clone $this;
     $scope->select('COUNT(*) AS count');
-    return $scope->first()->count;
+    $sth = $this->table->select($scope->sql_parts);
+    $result = $sth->fetch();
+    return $result['count'];
   }
 
 }
@@ -850,8 +899,9 @@ abstract class Model implements \ArrayAccess {
   protected $table;
 
   private $attr = array();
+  private $changes = array();
 
-  public function __construct($attributes = null) {
+  public function __construct($attributes = null, $protect_attrs = true) {
 
     $this->class = get_called_class();
     $this->table = Table::get($this->class);
@@ -862,19 +912,25 @@ abstract class Model implements \ArrayAccess {
       $this->attr[$attr_name] = $column->default_value();
 
     if(!is_null($attributes))
-      $this->set_attributes($attributes);
+      $this->set_attributes($attributes, $protect_attrs);
+  }
+
+  public function get_class() {
+    return $this->class;
   }
 
   public static function hydrate($attributes) {
     $class = get_called_class();
     $obj = new $class();
+    $obj->_bulk_assign($attributes);
     foreach($attributes as $attr_name => $attr_value)
       $obj->_set($attr_name, $attr_value);
+    $obj->_clear_changes();
     return $obj;
   }
 
   public function is_new_record() {
-    return !is_null($this->attr['id']);
+    return is_null($this->attr['id']);
   }
 
   public function __get($attr_name) {
@@ -887,6 +943,22 @@ abstract class Model implements \ArrayAccess {
 
   public function __isset($attr_name) {
     return !is_null($this->attribute($attr_name));
+  }
+
+  public function __call($method, $args) {
+    $columns = array_keys($this->table->columns);
+    $regex = '/(' . implode('|', $columns) . ')_(.+)/';
+    if(preg_match($regex, $method, $matches)) {
+      $attr = $matches[1];
+      switch($matches[2]) {
+        case 'was':
+        case 'change':
+        case 'is_changed':
+          $method = "attr_{$matches[2]}";
+          return $this->$method($attr);
+      }
+    }
+    throw new Exception("call to undefined method {$this->class}::$method()");
   }
 
   public function offsetExists($attr_name) {
@@ -926,7 +998,7 @@ abstract class Model implements \ArrayAccess {
   }
 
   protected function _get($name, $type_cast = true) {
-    #$this->ensure_attr_defined($name);
+    $this->ensure_attr_defined($name);
     $value = isset($this->attr[$name]) ? $this->attr[$name] : null;
     if(isset($this->table->columns[$name]) && $type_cast) {
       $value = $this->table->columns[$name]->cast($value);
@@ -935,42 +1007,32 @@ abstract class Model implements \ArrayAccess {
   }
 
   protected function _set($name, $value) {
-    #$this->ensure_attr_defined($name);
+
+    $this->ensure_attr_defined($name);
+
+    # dirty tracking -- only track changes on db columns
+    $track = false;
     if(isset($this->table->columns[$name])) {
-      # TODO : track changes for dirty tracking
+      $track = true;
+      $was = isset($this->changes[$name]) ? 
+        $this->changes[$name][0] : 
+        $this->attribute($name);
     }
+
     $this->attr[$name] = $value;
+
+    if($track) {
+      $is = $this->attribute($name);
+      if($was !== $is)
+        $this->changes[$name] = array($was, $is);    
+    }
   }
   
-  #protected function ensure_attr_defined($name) {
-  #  if(!isset($this->table->columns[$name]) && 
-  #     !in_array($name, static::$attr_accessors)) 
-  #  {
-  #    throw new NonExistantAttributeException($this->class, $name);
-  #  }
-  #}
-
-  protected function bulk_assign($attributes) {
-    if(empty(static::$attr_whitelist) && empty(static::$attr_blacklist)) {
-      # no whitelist or blacklist
-      foreach($attributes as $name => $value)
-        $this->set_attribute($name, $value);
-    } else if(!empty(static::$attr_whitelist)) {
-      # whitelisting
-      foreach($attributes as $name => $value) {
-        if(in_array($name, static::$attr_whitelist))
-          $this->set_attribute($name, $value);
-        else
-          throw new NonWhitelistedAttributeBulkAssigned($this->class, $name);
-      }
-    } else {
-      # blacklisting
-      foreach($attributes as $name => $value) {
-        if(in_array($name, static::$attr_blacklist))
-          throw new BlacklistedAttributeBulkAssigned($this->class, $name);
-        else
-          $this->set_attribute($name, $value);
-      }
+  protected function ensure_attr_defined($name) {
+    if(!isset($this->table->columns[$name]) && 
+       !in_array($name, static::$attr_accessors)) 
+    {
+      throw new UndefinedAttributeException($this->class, $name);
     }
   }
 
@@ -981,51 +1043,404 @@ abstract class Model implements \ArrayAccess {
     return $attributes;
   }
 
-  public function set_attributes($attributes) {
-    $this->bulk_assign($attributes);
+  public function set_attributes($attributes, $protect_attrs = true) {
+
+    # nullify bulk assigned empty strings
+    foreach($attributes as $attr_name => $attr_value)
+      if($attr_value === '')
+        $attributes[$attr_name] = null;
+
+    $unprotected = (
+      empty(static::$attr_whitelist) && 
+      empty(static::$attr_blacklist) ||
+      !$protect_attrs
+    );
+
+    if($unprotected)
+      $this->_bulk_assign($attributes);
+    else if(!empty(static::$attr_whitelist))
+      $this->_bulk_assign_whitelisted($attributes);
+    else
+      $this->_bulk_assign_blacklisted($attributes);
   }
 
-  public function update_attributes($attributes) {
-    $this->set_attributes($attributes);
+  private function _bulk_assign($attributes) {
+    foreach($attributes as $name => $value)
+      $this->set_attribute($name, $value);
+  }
+
+  private function _bulk_assign_whitelisted($attributes) {
+    foreach($attributes as $name => $value) {
+      if(in_array($name, static::$attr_whitelist))
+        $this->set_attribute($name, $value);
+      else
+        throw new NonWhitelistedAttributeBulkAssigned($this->class, $name);
+    }
+  }
+
+  private function _bulk_assign_blacklisted($attributes) {
+    foreach($attributes as $name => $value) {
+      if(in_array($name, static::$attr_blacklist))
+        throw new BlacklistedAttributeBulkAssigned($this->class, $name);
+      else
+        $this->set_attribute($name, $value);
+    }
+  }
+
+  private function _clear_changes() {
+    $this->changes = array();
+  }
+
+  public function is_changed() {
+    $changed = $this->changed();
+    return !empty($changed);
+  }
+
+  public function changed() {
+    return array_keys($this->changes);
+  }
+
+  public function changes() {
+    return $this->changes;
+  }
+
+  public function attr_change($attr) {
+    return isset($this->changes[$attr]) ? $this->changes[$attr] : null;
+  }
+
+  public function attr_is_changed($attr) {
+    return isset($this->changes[$attr]);
+  }
+
+  public function attr_was($attr) {
+    return isset($this->changes[$attr]) ?
+      $this->changes[$attr][0] : 
+      $this->$attr;
+  }
+
+  public function update_attributes($attributes, $protect_attrs = true) {
+    $this->set_attributes($attributes, $protect_attrs);
     return $this->save();
   }
 
-  public function create() {
-    if($this->validate()) {
-      $this->table->insert($this);
-      return true;
-    } else {
-      return true;
-    }
-  }
-
   public function save() {
-    if($this->is_new_record()) {
-      return $this->create();
-    } else {
-      if($this->validate()) {
-        $this->table->update($this);
-        return true;
-      } else {
-        return false;
-      }
-    }
+    return $this->is_new_record() ? $this->_create() : $this->_update();
   }
 
-  public function force_save() {
+  public function savex() {
     if(!$this->save())
       throw new RecordInvalidException($this);
   }
 
-  public function validate() {
-    $this->errors->clear();
-    # TODO : run validations
-    return $this->errors->is_empty();
+  public function create() {
+    if(!$this->is_new_record())
+      throw new Exception('create called on an existing record');
+    return $this->_create();
+  }
+
+  public function destroy() {
+    if($this->is_new_record())
+      throw new Exception('destroy called on a new record');
+    $this->before_destroy();
+    $this->table->delete($this);
+    $this->after_destroy();
   }
 
   public function to_param() {
-    return $this->_get('id');
+    if($this->is_new_record())
+      throw new Exception('to_param() called on a new record');
+    return (string) $this->_get('id');
   }
+
+  private function _validate($on_create) {
+    $this->errors->clear();
+    $this->before_validate();
+    if($on_create) {
+      $this->before_validate_on_create();
+      $this->validate();
+      $this->after_validate_on_create();
+    } else {
+      $this->validate();
+    }
+    $this->after_validate();
+    return $this->errors->is_empty();
+  }
+
+  private function _update() {
+    if($this->_validate(false)) {
+      $this->before_save();
+      $this->before_update();
+      $this->table->update($this);
+      $this->after_update();
+      $this->after_save();
+      $this->_clear_changes();
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  private function _create() {
+    if($this->_validate(true)) {
+      $this->before_save();
+      $this->before_create();
+      $this->table->insert($this);
+      $this->after_create();
+      $this->after_save();
+      $this->_clear_changes();
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  protected function validate() {}
+
+  protected function before_validate() {}
+  protected function after_validate() {}
+  protected function before_validate_on_create() {}
+  protected function after_validate_on_create() {}
+  protected function before_save() {}
+  protected function after_save() {}
+  protected function before_update() {}
+  protected function after_update() {}
+  protected function before_create() {}
+  protected function after_create() {}
+  protected function before_destroy() {}
+  protected function after_destroy() {}
+
+  ## validation methods
+
+  public function is_valid() {
+    return $this->_validate($this->is_new_record());  
+  }
+
+  protected function validate_acceptance_of() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+      $val = $this->attribute($attr);
+      if($val !== true) {
+        $msg = 'must be accepted';
+        $this->errors->add($attr, $msg);
+      }
+    });
+  }
+
+  protected function validate_as_boolean() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+      $val = $obj->attribute_before_type_cast($attr);
+      if($val !== 1 && 
+         $val !== 0 && 
+         $val !== '1' && 
+         $val !== '0' && 
+         $val !== true && 
+         $val !== false)
+      {
+        $msg = 'must be a boolean';
+        $obj->errors->add($attr, $msg);
+      }
+    });
+  }
+
+  protected function validate_as_date() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+      throw new Exception('not implmented yet');
+    });
+  }
+
+  protected function validate_as_datetime() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+      throw new Exception('not implmented yet');
+    });
+  }
+
+  protected function validate_as_id() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+      throw new Exception('not implmented yet');
+    });
+  }
+
+  protected function validate_as_uuid() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+      $value = $obj->attribute($attr);
+      $hex = '[0-9a-f]';
+      $regex = "/^$hex{8}-$hex{4}-$hex{4}-$hex{4}-$hex{12}$/";
+      if(!preg_match($regex, $value)) {
+        $msg = 'is not a valid UUID';
+        $obj->errors->add($attr, $msg);
+      }
+    });
+  }
+
+  protected function validate_confirmation_of() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+      $other_attr = "{$attr}_confirmation";
+      if($obj->attribute($attr) !== $obj->attribute("{$attr}_confirmation")) {
+        $msg = 'doesn\'t match confirmation';
+        $obj->errors->add($attr, $msg);
+      }
+    });
+  }
+
+  protected function validate_exclusion_of() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+      throw new Exception('not implmented yet');
+    });
+  }
+
+  protected function validate_inclusion_of() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+      throw new Exception('not implmented yet');
+    });
+  }
+
+  protected function validate_format_of() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+
+      if(!isset($opts['regex']))
+        throw new Exception("missing regex option for $attr");
+
+      $val = (string) $obj->attribute_before_type_cast($attr);
+      if(!preg_match($opts['regex'], $val)) {
+        $msg = 'is invalid';
+        $obj->errors->add($attr, $msg);
+      }
+
+    });
+  }
+
+  protected function validate_length_of() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+
+      $val = (string) $obj->attribute($attr);
+      $length = strlen($val);
+
+      if(isset($opts['is'])) {
+        $is = $opts['is'];
+        if($length != $is) {
+          $msg = "is the wrong length (should be $is characters)";
+          $obj->errors->add($attr, $msg);
+        }
+      }
+
+      if(isset($opts['maximum'])) {
+        $max = $opts['maximum'];
+        if($length > $max) {
+          $msg = "is too long (maximum is $max)";
+          $obj->errors->add($attr, $msg);
+        }
+      }
+
+      if(isset($opts['minimum'])) {
+        $min = $opts['minimum'];
+        if($length > $min) {
+          $msg = "is too long (minimum is $min)";
+          $obj->errors->add($attr, $msg);
+        }
+      }
+
+    });
+  }
+
+  protected function validate_numericality_of() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+      throw new Exception('not implmented yet');
+    });
+  }
+
+  protected function validate_presence_of() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+      $val = $obj->attribute_before_type_cast($attr);
+      if(is_null($val) || $val === '') {
+        $msg = 'may not be blank';
+        $obj->errors->add($attr, $msg);
+      }
+    });
+  }
+
+  protected function validate_size_of() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+      throw new Exception('not implmented yet');
+    });
+  }
+
+  protected function validate_uniqueness_of() {
+    $this->validate_each(func_get_args(), function($obj, $attr, $opts) {
+
+      $class = $obj->get_class();
+      $scope = $class::scope();
+
+      if(isset($opts['case_sensitive']) && $opts['case_sensitive'])
+        $method = "{$attr}_is_exactly";
+      else
+        $method = "{$attr}_is";
+
+      $scope->$method($obj->attribute($attr));
+
+      if(!$obj->is_new_record())
+        $scope->id_is_not($obj->id);
+
+      if($scope->first())
+        $obj->errors->add($attr, 'is already taken');  
+
+    });
+  }
+
+  protected function validate_each($attributes, $callback) {
+
+    $opts = is_array($attributes[count($attributes) - 1]) ? 
+      array_pop($attributes) : 
+      array();
+    
+    foreach($attributes as $attribute)
+      if(!$this->validation_should_be_skipped($attribute, $opts)) {
+        $callback($this, $attribute, $opts);
+      }
+
+  }
+
+  private function validation_should_be_skipped($attr, $validation_opts) {
+
+    $opts = &$validation_opts;
+
+    # skip this validation if it allows_null and has a null value
+    if(isset($opts['allow_null']) && $opts['allow_null'] &&
+      is_null($this->attribute_before_type_cast($attr)))
+    {
+      return true;
+    }
+
+    if(isset($opts['if']) && $this->$opts['if']() == false)
+      return true;
+
+    if(isset($opts['unless']) && $this->$opts['unless']() == true)
+      return true;
+
+    if(isset($opts['on'])) {
+      $on = $opts['on'];
+      switch($on) {
+        case 'save':
+          return false;
+        case 'create':
+          return !$this->is_new_record();
+        case 'update':
+          return $this->is_new_record();
+        default:
+          throw new Exception("invalid on condition for validation: $on");
+      }
+    }
+
+    return false;
+  }
+
+  # defaults:
+  #
+  # on => (save/create/update)
+  # if => null
+  # unless => null
+  # message => (varies by validation)
+  # allow_null => (false/true)
+
+  ## scoped finder methods
 
   public static function __callStatic($method, $args) {
     $scope = static::scope();
@@ -1089,6 +1504,10 @@ class Errors {
       $this->msgs[$to] = array($msg);
   }
 
+  public function has_errors_on($attr) {
+    return isset($this->msgs[$attr]);
+  }
+
   public function on($attr) {
     return isset($this->msgs[$attr]) ? $this->msgs[$attr] : null;
   }
@@ -1115,19 +1534,19 @@ class Errors {
       return array();
 
     $messages = array();
-    $this->each_full_message(function($message) use (&$messages) {
+    $this->each_message(function($message) use (&$messages) {
       array_push($messages, $message);
     });
     return $messages;
   }
 
-  public function each_message($callback) {
+  public function each($callback) {
     foreach($this->msgs as $on => $messages)
       foreach($messages as $message)
         $callback($on, $message);
   }
 
-  public function each_full_message($callback) {
+  public function each_message($callback) {
     foreach($this->msgs as $on => $messages)
       foreach($messages as $message)
         $callback($this->expand_message($on, $message));
@@ -1146,7 +1565,4 @@ class Errors {
     return implode(', ', $this->full_messages());
   }
 
-  # TODO : public function to_xml() {}
-  # TODO : public function to_json() {}
-  # TODO : implement iterator interface, should iterate through full_messages
 }
