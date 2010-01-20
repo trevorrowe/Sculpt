@@ -31,6 +31,12 @@
  *
  */
 
+# TODO : enable custom error messages for validations
+# TODO : write tests
+# TODO : add string inflections for table names, assoc names, error msgs, etc
+# TODO : write the "other" validations
+# TODO : modify how static function scopes are called to allow args
+
 namespace Sculpt;
 
 use PDO;
@@ -241,9 +247,11 @@ abstract class Column {
       case self::DATE:
         if($value instanceof DateTime)
           return $value;
+        if(is_numeric($value))
+          $value = strftime('%F %T', $value);
         $value = date_create($value);
         $errors = \DateTime::getLastErrors();
-        if ($errors['warning_count'] > 0 || $errors['error_count'] > 0)
+        if($errors['warning_count'] > 0 || $errors['error_count'] > 0)
           return null;
         return $value;
     }
@@ -422,19 +430,29 @@ class Table {
     $this->name = isset($class::$table_name) ?
       $class::$table_name :
       strtolower($class) . 's';
-      # TODO : use a string inflector to create a table name
 
     $this->columns = $this->connection->columns($this->name);
 
   }
 
   public function insert($obj) {
+
     $columns = array();
     $bind_params = array(); 
+
     foreach($obj->changed() as $attr) {
       $columns[] = $attr;
       $bind_params[] = $obj->attribute($attr);
     }
+
+    $timestamp = strftime('%Y-%m-%d %T');
+    foreach(array('created_at', 'updated_at') as $timestamp_column) {
+      if(isset($this->columns[$timestamp_column])) {
+        $columns[] = $timestamp_column;
+        $bind_params[] = $timestamp;
+      }
+    }
+
     $columns = implode(', ', $columns);
     $placeholders = rtrim(str_repeat('?, ', count($bind_params)), ', ');
     $sql = "INSERT INTO $this->name ($columns) VALUES ($placeholders)";
@@ -443,12 +461,21 @@ class Table {
   }
 
   public function update($obj) {
+
+    if($obj->is_unchanged()) return;
+
     $set = array();
     $bind_params = array();
     foreach($obj->changed() as $attr) {
       $set[] = "$attr = ?";
       $bind_params[] = $obj->attribute($attr);
     }
+
+    if(isset($this->columns['updated_at'])) {
+      $set[] = 'updated_at = ?';
+      $bind_params[] = strftime('%Y-%m-%d %T');
+    }
+
     $bind_params[] = $obj->id;
     $set = implode(', ', $set);
     $sql = "UPDATE $this->name SET $set WHERE id = ?";
@@ -461,8 +488,6 @@ class Table {
     $sth = $this->connection->query($sql, $bind_params);
   }
 
-  # TODO : move to the abstract connection classs?
-  # TODO : allow scopes to access the sql for thigns like count
   public function select($opts = array()) {
 
     $bind_params = array();
@@ -646,12 +671,12 @@ class Scope {
     # dynamic class scope (e.g. User::admin_scope($scope))
     $static_method = "{$method}_scope";
     if(method_exists($class, $static_method)) {
-      $class::$static_method($this);
+      array_unshift($args, $this);
+      call_user_func_array(array($class, $static_method), $args);
       return $this;
     }
 
     # sorting (ascend or decend by a single column)
-    # TODO : raise an exception if not a valid column
     if(preg_match('/(asc|ascend|desc|descend)_by_(.+)/', $method, $matches)) {
       $dir = $matches[1] == 'asc' || $matches[1] == 'ascend' ? 'ASC' : 'DESC';
       $this->order("{$matches[2]} $dir");
@@ -923,8 +948,6 @@ abstract class Model implements \ArrayAccess {
     $class = get_called_class();
     $obj = new $class();
     $obj->_bulk_assign($attributes);
-    foreach($attributes as $attr_name => $attr_value)
-      $obj->_set($attr_name, $attr_value);
     $obj->_clear_changes();
     return $obj;
   }
@@ -1006,11 +1029,10 @@ abstract class Model implements \ArrayAccess {
     return $value;
   }
 
-  protected function _set($name, $value) {
-
+  protected function _set($name, $value) { 
     $this->ensure_attr_defined($name);
 
-    # dirty tracking -- only track changes on db columns
+    # dirty tracking -- track changes on db column attributes
     $track = false;
     if(isset($this->table->columns[$name])) {
       $track = true;
@@ -1094,6 +1116,10 @@ abstract class Model implements \ArrayAccess {
   public function is_changed() {
     $changed = $this->changed();
     return !empty($changed);
+  }
+
+  public function is_unchanged() {
+    return !$this->is_changed();
   }
 
   public function changed() {
@@ -1220,7 +1246,7 @@ abstract class Model implements \ArrayAccess {
       $val = $this->attribute($attr);
       if($val !== true) {
         $msg = 'must be accepted';
-        $this->errors->add($attr, $msg);
+        $obj->errors->add($attr, $msg);
       }
     });
   }
@@ -1332,8 +1358,8 @@ abstract class Model implements \ArrayAccess {
 
       if(isset($opts['minimum'])) {
         $min = $opts['minimum'];
-        if($length > $min) {
-          $msg = "is too long (minimum is $min)";
+        if($length < $min) {
+          $msg = "is too short (minimum is $min)";
           $obj->errors->add($attr, $msg);
         }
       }
@@ -1392,9 +1418,8 @@ abstract class Model implements \ArrayAccess {
       array();
     
     foreach($attributes as $attribute)
-      if(!$this->validation_should_be_skipped($attribute, $opts)) {
+      if(!$this->validation_should_be_skipped($attribute, $opts))
         $callback($this, $attribute, $opts);
-      }
 
   }
 
@@ -1553,7 +1578,6 @@ class Errors {
   }
 
   protected function expand_message($on, $msg) {
-    # TODO : $on needs to be titleized
     return trim("$on $msg");
   }
 
