@@ -386,34 +386,17 @@ class UndefinedAttributeException extends Exception {
 /**
  * @package Sculpt
  */
-class NonWhitelistedAttributeBulkAssigned extends Exception {
-  public function __construct($class, $attr_name) {
-    $msg = "$class class: non-whitelisted attribute `$attr_name` bulk assigned";
-    parent::__construct($msg);
-  }
-}
-
-/**
- * @package Sculpt
- */
-class BlacklistedAttributeBulkAssigned extends Exception {
-  public function __construct($class, $attr_name) {
-    $msg = "$class class: blacklisted attribute `$attr_name` bulk assigned";
-    parent::__construct($msg);
-  }
-}
-
-/**
- * @package Sculpt
- */
 class Table {
 
   private static $cache = array();
 
-  public $name;
   public $class;
-  public $columns;
+
+  public $name;
+
   public $connection;
+
+  public $columns;
 
   public static function get($class_name) {
     if(!isset(self::$cache[$class_name]))
@@ -422,17 +405,12 @@ class Table {
   }
 
   protected function __construct($class) {
-    
     $this->class = $class;
-
-    $this->connection = Connection::get($class::$connection);
-
     $this->name = isset($class::$table_name) ?
       $class::$table_name :
-      strtolower($class) . 's';
-
+      tableize($class);
+    $this->connection = Connection::get($class::$connection);
     $this->columns = $this->connection->columns($this->name);
-
   }
 
   public function insert($obj) {
@@ -482,22 +460,24 @@ class Table {
     $sth = $this->connection->query($sql, $bind_params);
   }
 
-  public function delete($obj) {
-    $sql = "DELETE FROM $this->name WHERE id = ?";
-    $bind_params = array($obj->id);
+  # TODO : update the destory method
+  public function delete($opts = array()) {
+    $bind_params = array();
+    $sql = 'DELETE';
+    $sql .= $this->from_fragment($opts);
+    $sql .= $this->joins_fragment($opts);
+    $sql .= $this->where_fragment($opts, $bind_params);
     $sth = $this->connection->query($sql, $bind_params);
+    return $sth->rowCount();
   }
 
   public function select($opts = array()) {
 
     $bind_params = array();
 
-    $sql = $this->select_fragment($opts);
+    $sql  = $this->select_fragment($opts);
     $sql .= $this->from_fragment($opts);
-
-    if(isset($parts['joins']))
-      $sql .= implode(', ', $parts['joins']);
-
+    $sql .= $this->joins_fragment($opts);
     $sql .= $this->where_fragment($opts, $bind_params);
 
     if(!empty($opts['group'])) {
@@ -531,6 +511,10 @@ class Table {
     return " FROM $from";
   }
 
+  private function joins_fragment($opts) {
+    return isset($opts['joins']) ? ' ' . implode(', ', $opts['joins'] ) : '';
+  }
+
   private function where_fragment($opts, &$bind_params) {
 
     if(empty($opts['where']))
@@ -540,7 +524,7 @@ class Table {
     foreach($opts['where'] as $where) {
       switch(true) {
 
-        # 'admin' => array('admin' => true)
+        # array('admin' => true)
         case is_assoc($where):
           $condition = array();
           foreach($where as $col_name => $col_value)
@@ -549,13 +533,13 @@ class Table {
           $bind_params = array_merge($bind_params, array_values($where));
           break;
 
-        # 'admin' => array('admin = ?', true)
+        # array('admin = ?', true)
         case is_array($where):
           $condition = array_shift($where);
           $bind_params = array_merge($bind_params, $where);
           break;
 
-        # admin => 'admin = 1'
+        # 'admin = 1'
         case is_string($where):
           $condition = $where;
           break;
@@ -652,8 +636,16 @@ class Scope {
   }
 
   public function __get($scope) {
-    if(in_array($scope, array('all', 'first', 'get')))
+
+    $scope_terminators = array(
+      'get', 'first', 'all',
+      'paginate', 'count',
+      'delete_all', 'destroy_all',
+    );
+
+    if(in_array($scope, $scope_terminators))
       return $this->$scope();
+
     $this->$scope();
     return $this;
   }
@@ -825,7 +817,7 @@ class Scope {
     else
       $total = $this->count();
 
-    return new Collection($page, $per_page, $total, $objects);
+    return new Collection($objects, $page, $per_page, $total);
   }
 
   public function count() {
@@ -834,6 +826,18 @@ class Scope {
     $sth = $this->table->select($scope->sql_parts);
     $result = $sth->fetch();
     return $result['count'];
+  }
+
+  public function delete_all($where = null) {
+    if($where)
+      $this->where(func_get_args());
+    return $this->table->delete($this->sql_parts);
+  }
+
+  public function destory_all($opts = array()) {
+    $this->apply_static_scope($opts);
+    # TODO : batch_find the objects that need destroying, calling destory
+    throw new Exception("haven't finished implementing this!");
   }
 
 }
@@ -845,18 +849,29 @@ class Collection implements \Iterator, \Countable, \ArrayAccess {
 
   public static $default_per_page = 10;
 
-  public $page;
-  public $per_page;
-  public $total;
+  protected $paging_info = array();
 
   private $objects;
+
   private $position = 0;
 
-  public function __construct($page, $per_page, $total, $objects) {
+  public function __construct($objects, $page, $per_page, $total) {
+
     $this->objects = $objects;
-    $this->page = $page;
-    $this->per_page = $per_page;
-    $this->total = $total;
+
+    $this->paging_info['page']      = $page;
+    $this->paging_info['per_page']  = $per_page;
+    $this->paging_info['total']     = $total;
+    $this->paging_info['pages']     = ceil((float) $total / $per_page);
+    $this->paging_info['prev_page'] = $page > 1 ? $page - 1 : null;
+    $this->paging_info['next_page'] = $page < $this->pages ? $page + 1 : null;
+
+  }
+
+  public function __get($key) {
+    if(array_key_exists($key, $this->paging_info))
+      return $this->paging_info[$key];
+    throw new Exception("undefined attribute `$key` for " . __CLASS__);
   }
 
   public function rewind() {
@@ -899,8 +914,8 @@ class Collection implements \Iterator, \Countable, \ArrayAccess {
     return $this->total;
   }
 
-  public function total() {
-    return $this->total;
+  public function is_empty() {
+    return $this->total == 0;
   }
 
 }
@@ -1092,21 +1107,15 @@ abstract class Model implements \ArrayAccess {
   }
 
   private function _bulk_assign_whitelisted($attributes) {
-    foreach($attributes as $name => $value) {
+    foreach($attributes as $name => $value)
       if(in_array($name, static::$attr_whitelist))
         $this->set_attribute($name, $value);
-      else
-        throw new NonWhitelistedAttributeBulkAssigned($this->class, $name);
-    }
   }
 
   private function _bulk_assign_blacklisted($attributes) {
-    foreach($attributes as $name => $value) {
-      if(in_array($name, static::$attr_blacklist))
-        throw new BlacklistedAttributeBulkAssigned($this->class, $name);
-      else
+    foreach($attributes as $name => $value)
+      if(!in_array($name, static::$attr_blacklist))
         $this->set_attribute($name, $value);
-    }
   }
 
   private function _clear_changes() {
@@ -1168,7 +1177,7 @@ abstract class Model implements \ArrayAccess {
     if($this->is_new_record())
       throw new Exception('destroy called on a new record');
     $this->before_destroy();
-    $this->table->delete($this);
+    $this->table->delete(array('where' => array('id' => $this->id)));
     $this->after_destroy();
   }
 
@@ -1220,7 +1229,7 @@ abstract class Model implements \ArrayAccess {
     }
   }
 
-  protected function validate() {}
+  public function validate() {}
 
   protected function before_validate() {}
   protected function after_validate() {}
@@ -1499,6 +1508,10 @@ abstract class Model implements \ArrayAccess {
 
   public static function find($opts = array()) {
     return static::scope()->find($opts);
+  }
+
+  public static function delete_all($opts = array()) {
+    return static::scope()->delete_all($opts);
   }
 
   public static function table_name() {
