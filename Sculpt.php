@@ -521,7 +521,7 @@ class Table {
       return '';
 
     $conditions = array();
-    foreach($opts['where'] as $where) {
+    foreach($opts['where'] as $i => $where) {
       switch(true) {
 
         # array('admin' => true)
@@ -535,8 +535,9 @@ class Table {
 
         # array('admin = ?', true)
         case is_array($where):
-          $condition = array_shift($where);
-          $bind_params = array_merge($bind_params, $where);
+          $condition = $where[0];
+          for($i = 1; $i < count($where); ++$i)
+            $bind_params[] = $where[$i];
           break;
 
         # 'admin = 1'
@@ -549,6 +550,7 @@ class Table {
 
       }
       $conditions[] = "($condition)";
+
     }
     return " WHERE " . implode(' AND ', $conditions);
   }
@@ -638,9 +640,26 @@ class Scope {
   public function __get($scope) {
 
     $scope_terminators = array(
-      'get', 'first', 'all',
-      'paginate', 'count',
-      'delete_all', 'destroy_all',
+
+      # singular terminators, operates on at most 1 db record, 
+      # excepts or requires an id
+      'first',
+      'get',
+      'delete',
+      'destroy',
+
+      # plural terminators, operates on a collection of db records
+      'all',
+      'delete_all',
+      'destroy_all',
+      'each',
+      'batch',
+
+      # pagination terminators, operates on a collection of db records,
+      # accepts special arguments
+      'paginate',
+      'count',
+
     );
 
     if(in_array($scope, $scope_terminators))
@@ -677,7 +696,7 @@ class Scope {
 
     # auto-magical scopes id_is, age_lte, etc
     $columns = array_keys($this->table->columns);
-    $regex = '/(' . implode('|', $columns) . ')_(.+)/';
+    $regex = '/^(' . implode('|', $columns) . ')_(.+)$/';
     if(preg_match($regex, $method, $matches)) {
       $col = $matches[1];
       switch($matches[2]) {
@@ -766,33 +785,70 @@ class Scope {
         $this->$key($value);
   }
 
-  public function get($id = null) {
-
+  public function first($id = null) {
     $scope = clone $this;
-
     if(!is_null($id))
       $scope->id_is($id);
-
-    $record = $scope->first();  
-    if(is_null($record))
-      throw new RecordNotFoundException($scope);
-
-    return $record;
-  }
-
-  public function first() {
-    $scope = clone $this;
     $results = $scope->limit(1)->all();
     return empty($results) ? null : $results[0];
   }
 
+  public function get($id) {
+    $scope = clone $this;
+    $record = $scope->first($id);
+    if(is_null($record))
+      throw new RecordNotFoundException($scope);
+    return $record;
+  }
+
+  public function delete($id) {
+    $scope = clone $this;
+    return $scope->id_is($id)->limit(1)->delete_all();
+  }
+
+  public function destroy($id) {
+    $obj = $this->get($id);
+    $obj->destroy();
+    return $obj;
+  }
+
   public function all() {
     $sth = $this->table->select($this->sql_parts);
-    $class = $this->table->class;
     $objects = array();
+    $class = $this->table->class;
     while($row = $sth->fetch())
       $objects[] = $class::hydrate($row);
     return $objects;
+  }
+
+  public function delete_all() {
+    return $this->table->delete($this->sql_parts);
+  }
+
+  public function destory_all() {
+    $this->each(function($obj) {
+      $obj->destroy();
+    });
+  }
+
+  public function each($callback) {
+    $this->batch(function($batch) {
+      foreach($batch as $obj)
+        $callback($obj);
+    });
+  }
+
+  public function batch($callback, $batch_size = 1000) {
+    $scope = clone $this;
+    $scope->limit($batch_size);
+    $scope->order('id ASC');
+    do {
+      $batch = $scope->all();
+      if(empty($batch))
+        return; # no matching records
+      $callback($batch);
+      $scope->where('id > ?', $batch[count($batch) - 1]->id);
+    } while(count($batch) == $batch_size);
   }
 
   public function paginate($page = null, $per_page = null) {
@@ -818,6 +874,7 @@ class Scope {
       $total = $this->count();
 
     return new Collection($objects, $page, $per_page, $total);
+
   }
 
   public function count() {
@@ -826,18 +883,6 @@ class Scope {
     $sth = $this->table->select($scope->sql_parts);
     $result = $sth->fetch();
     return $result['count'];
-  }
-
-  public function delete_all($where = null) {
-    if($where)
-      $this->where(func_get_args());
-    return $this->table->delete($this->sql_parts);
-  }
-
-  public function destory_all($opts = array()) {
-    $this->apply_static_scope($opts);
-    # TODO : batch_find the objects that need destroying, calling destory
-    throw new Exception("haven't finished implementing this!");
   }
 
 }
@@ -1173,11 +1218,15 @@ abstract class Model implements \ArrayAccess {
     return $this->_create();
   }
 
+  public function delete() {
+    throw new Exception('write this');
+  }
+
   public function destroy() {
     if($this->is_new_record())
       throw new Exception('destroy called on a new record');
     $this->before_destroy();
-    $this->table->delete(array('where' => array('id' => $this->id)));
+    self::scope()->delete($this->id);
     $this->after_destroy();
   }
 
@@ -1486,32 +1535,40 @@ abstract class Model implements \ArrayAccess {
     return new Scope(Table::get(get_called_class()));
   }
 
-  public static function get($id = null) {
-    return static::scope()->get($id);
+  public static function first($id = null) {
+    return static::scope()->first($id);
   }
 
-  public static function first() {
-    return static::scope()->first();
+  public static function get($id) {
+    return static::scope()->get($id);
   }
 
   public static function all() {
     return static::scope()->all();
   }
 
-  public static function paginate($page, $per_page = null) {
+  public static function delete_all() {
+    return static::scope()->delete_all();
+  }
+
+  public static function destroy_all() {
+    return static::scope()->destroy_all();
+  }
+
+  public static function each($callback) {
+    return static::scope()->each($callback);
+  }
+
+  public static function batch($callback, $batch_size = 1000) {
+    return static::scope()->batch($callback, $batch_size);
+  }
+
+  public static function paginate($page = null, $per_page = null) {
     return static::scope()->paginate($page, $per_page);
   }
 
   public static function count() {
     return static::scope()->count();
-  }
-
-  public static function find($opts = array()) {
-    return static::scope()->find($opts);
-  }
-
-  public static function delete_all($opts = array()) {
-    return static::scope()->delete_all($opts);
   }
 
   public static function table_name() {
