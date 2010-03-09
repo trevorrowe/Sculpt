@@ -388,7 +388,11 @@ class UndefinedAttributeException extends Exception {
  */
 class Table {
 
+  # caching constructed Table objects, use Table::get() to access these
   private static $cache = array();
+
+  # caching query results
+  protected $row_cache = array();
 
   public $class;
 
@@ -461,67 +465,77 @@ class Table {
   }
 
   # TODO : update the destory method
-  public function delete($opts = array()) {
+  public function delete($sql_parts = array()) {
     $bind_params = array();
     $sql = 'DELETE';
-    $sql .= $this->from_fragment($opts);
-    $sql .= $this->joins_fragment($opts);
-    $sql .= $this->where_fragment($opts, $bind_params);
+    $sql .= $this->from_fragment($sql_parts);
+    $sql .= $this->joins_fragment($sql_parts);
+    $sql .= $this->where_fragment($sql_parts, $bind_params);
     $sth = $this->connection->query($sql, $bind_params);
     return $sth->rowCount();
   }
 
-  public function select($opts = array()) {
+  public function select($sql_parts, $cache) {
+
+    if($cache && ($row_cache = $this->row_cache_hit($sql_parts)))
+      return $row_cache;
 
     $bind_params = array();
 
-    $sql  = $this->select_fragment($opts);
-    $sql .= $this->from_fragment($opts);
-    $sql .= $this->joins_fragment($opts);
-    $sql .= $this->where_fragment($opts, $bind_params);
+    $sql  = $this->select_fragment($sql_parts);
+    $sql .= $this->from_fragment($sql_parts);
+    $sql .= $this->joins_fragment($sql_parts);
+    $sql .= $this->where_fragment($sql_parts, $bind_params);
 
-    if(!empty($opts['group'])) {
-      $sql .= " GROUP BY {$opts['group']}";
-      if(isset($opts['having']))
-        $sql .= " HAVING {$opts['having']}";
+    if(!empty($sql_parts['group'])) {
+      $sql .= " GROUP BY {$sql_parts['group']}";
+      if(isset($sql_parts['having']))
+        $sql .= " HAVING {$sql_parts['having']}";
     }
 
-    if(isset($opts['order']))
-      $sql .= " ORDER BY {$opts['order']}";
+    if(isset($sql_parts['order']))
+      $sql .= " ORDER BY {$sql_parts['order']}";
 
-    if(isset($opts['limit']))
-      $sql .= " LIMIT {$opts['limit']}";
+    if(isset($sql_parts['limit']))
+      $sql .= " LIMIT {$sql_parts['limit']}";
 
-    if(isset($opts['offset']))
-      $sql .= " OFFSET {$opts['offset']}";
+    if(isset($sql_parts['offset']))
+      $sql .= " OFFSET {$sql_parts['offset']}";
 
-    return $this->connection->query($sql, $bind_params);
+    $sth = $this->connection->query($sql, $bind_params);
+    $rows = $sth->fetchAll();
+
+    if($cache)
+      $this->cache_rows($sql_parts, $rows);
+
+    return $rows;
+
   }
 
-  private function select_fragment($opts) {
-    if(isset($opts['select']))
-      $select = $opts['select'];
+  private function select_fragment($sql_parts) {
+    if(isset($sql_parts['select']))
+      $select = $sql_parts['select'];
     else
       $select = '*';
     return "SELECT $select";
   }
 
-  private function from_fragment($opts) {
+  private function from_fragment($parts) {
     $from = isset($parts['from']) ? $parts['from'] : $this->name;
     return " FROM $from";
   }
 
-  private function joins_fragment($opts) {
-    return isset($opts['joins']) ? ' ' . implode(', ', $opts['joins'] ) : '';
+  private function joins_fragment($parts) {
+    return isset($parts['joins']) ? ' ' . implode(', ', $parts['joins'] ) : '';
   }
 
-  private function where_fragment($opts, &$bind_params) {
+  private function where_fragment($parts, &$bind_params) {
 
-    if(empty($opts['where']))
+    if(empty($parts['where']))
       return '';
 
     $conditions = array();
-    foreach($opts['where'] as $i => $where) {
+    foreach($parts['where'] as $i => $where) {
       switch(true) {
 
         # array('admin' => true)
@@ -553,6 +567,21 @@ class Table {
 
     }
     return " WHERE " . implode(' AND ', $conditions);
+  }
+
+  protected function row_cache_key($sql_parts) {
+    return serialize($sql_parts);
+  }
+
+  protected function row_cache_hit($sql_parts) {
+    $cache_key = $this->row_cache_key($sql_parts);
+    if(isset($this->row_cache[$cache_key]))
+      return $this->row_cache[$cache_key];
+    return false;
+  }
+
+  protected function cache_rows($sql_parts, $rows) {
+    $this->row_cache[$this->row_cache_key($sql_parts)] = $rows;
   }
 
 }
@@ -785,38 +814,34 @@ class Scope {
         $this->$key($value);
   }
 
-  public function first($id = null) {
+  public function first($cache = true) {
     $scope = clone $this;
-    if(!is_null($id))
-      $scope->id_is($id);
-    $results = $scope->limit(1)->all();
+    $results = $scope->limit(1)->all($cache);
     return empty($results) ? null : $results[0];
   }
 
-  public function get($id) {
-    $scope = clone $this;
-    $record = $scope->first($id);
+  public function get($cache = true) {
+    $record = $this->first($cache);
     if(is_null($record))
-      throw new RecordNotFoundException($scope);
+      throw new RecordNotFoundException($this);
     return $record;
   }
 
-  public function delete($id) {
+  public function delete() {
     $scope = clone $this;
-    return $scope->id_is($id)->limit(1)->delete_all();
+    return $scope->limit(1)->delete_all();
   }
 
-  public function destroy($id) {
-    $obj = $this->get($id);
+  public function destroy() {
+    $obj = $this->get();
     $obj->destroy();
     return $obj;
   }
 
-  public function all() {
-    $sth = $this->table->select($this->sql_parts);
-    $objects = array();
+  public function all($cache = true) {
     $class = $this->table->class;
-    while($row = $sth->fetch())
+    $objects = array();
+    foreach($this->table->select($this->sql_parts, $cache) as $row)
       $objects[] = $class::hydrate($row);
     return $objects;
   }
@@ -843,7 +868,7 @@ class Scope {
     $scope->limit($batch_size);
     $scope->order('id ASC');
     do {
-      $batch = $scope->all();
+      $batch = $scope->all(false);
       if(empty($batch))
         return; # no matching records
       $callback($batch);
@@ -863,26 +888,25 @@ class Scope {
     $offset = ($page - 1) * $per_page;
 
     $scope = clone $this;
-    $objects = $scope->limit($limit)->offset($offset)->all();
+    $objects = $scope->limit($limit)->offset($offset)->all(false);
 
     $count = count($objects);
     if($count == 0)
-      $total = $offset == 0 ? 0 : $this->count();
+      $total = $offset == 0 ? 0 : $this->count(false);
     else if($count < $limit)
       $total = count($objects) + $offset;
     else
-      $total = $this->count();
+      $total = $this->count(false);
 
     return new Collection($objects, $page, $per_page, $total);
 
   }
 
-  public function count() {
+  public function count($cache = true) {
     $scope = clone $this;
     $scope->select('COUNT(*) AS count');
-    $sth = $this->table->select($scope->sql_parts);
-    $result = $sth->fetch();
-    return $result['count'];
+    $rows = $this->table->select($scope->sql_parts, $cache);
+    return $rows[0]['count'];
   }
 
 }
@@ -1535,16 +1559,16 @@ abstract class Model implements \ArrayAccess {
     return new Scope(Table::get(get_called_class()));
   }
 
-  public static function first($id = null) {
-    return static::scope()->first($id);
+  public static function first($cache = true) {
+    return static::scope()->first($cache);
   }
 
   public static function get($id) {
-    return static::scope()->get($id);
+    return static::scope()->id_is($id)->get();
   }
 
-  public static function all() {
-    return static::scope()->all();
+  public static function all($cache = true) {
+    return static::scope()->all($cache);
   }
 
   public static function delete_all() {
@@ -1567,8 +1591,8 @@ abstract class Model implements \ArrayAccess {
     return static::scope()->paginate($page, $per_page);
   }
 
-  public static function count() {
-    return static::scope()->count();
+  public static function count($cache = true) {
+    return static::scope()->count($cache);
   }
 
   public static function table_name() {
