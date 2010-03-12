@@ -410,9 +410,7 @@ class Table {
 
   protected function __construct($class) {
     $this->class = $class;
-    $this->name = isset($class::$table_name) ?
-      $class::$table_name :
-      tableize($class);
+    $this->name = $class::tablename();
     $this->connection = Connection::get($class::$connection);
     $this->columns = $this->connection->columns($this->name);
   }
@@ -516,7 +514,7 @@ class Table {
     if(isset($sql_parts['select']))
       $select = $sql_parts['select'];
     else
-      $select = '*';
+      $select = "{$this->name}.*";
     return "SELECT $select";
   }
 
@@ -605,17 +603,19 @@ class Scope {
     'offset' => null,
   );
 
-  public function __construct($table) {
+  public function __construct($table, $scope_opts = null) {
     $this->table = $table;
-  }
-
-  public function from($table_name) {
-    $this->sql_parts['from'] = $table_name;
-    return $this;
+    if($scope_opts)
+      $this->apply_scope_opts($scope_opts);
   }
 
   public function select($select_sql_fragment) {
     $this->sql_parts['select'] = $select_sql_fragment;
+    return $this;
+  }
+
+  public function from($table_name) {
+    $this->sql_parts['from'] = $table_name;
     return $this;
   }
 
@@ -662,7 +662,7 @@ class Scope {
   }
 
   public function find($opts = array()) {
-    $this->apply_static_scope($opts);
+    $this->apply_scope_opts($opts);
     return $this;
   }
 
@@ -704,7 +704,7 @@ class Scope {
 
     # static class scope (e.g. User::$scopes['admin'])
     if(isset($class::$scopes[$method])) {
-      $this->apply_static_scope($class::$scopes[$method]);
+      $this->apply_scope_opts($class::$scopes[$method]);
       return $this;
     }
 
@@ -806,12 +806,12 @@ class Scope {
     return $this;
   }
 
-  protected function apply_static_scope($static_scope) {
-    foreach($static_scope as $key => $value)
-      if(is_numeric($key)) # some_other_scope
-        $this->$value;
-      else # where
-        $this->$key($value);
+  protected function apply_scope_opts($opts) {
+    foreach($opts as $key => $value)
+      if(is_numeric($key))    # if the key is numeric we will assume is another
+        $this->$value;        # (named) scope to apply
+      else
+        $this->$key($value);  # otherwise its a standard scope
   }
 
   public function first($cache = true) {
@@ -911,6 +911,164 @@ class Scope {
 
 }
 
+class Association extends Scope {
+
+  protected $assoc_owner;
+
+  protected $name;
+
+  protected $config;
+
+  protected $singular;
+
+  protected $class;
+
+  public function __construct($assoc_owner, $name, $config, $singular) {
+
+    $this->assoc_owner = $assoc_owner;
+    $this->name = $name;
+    $this->config = $config;
+    $this->singular = $singular;
+
+    $this->class = isset($config['class']) ? 
+      $config['class'] : 
+      classify($name);
+
+    $table = Table::get($this->class);
+    parent::__construct($table);
+
+  }
+
+  public function is_singular() {
+    return $this->singular;
+  }
+
+}
+
+class BelongsToAssociation extends Association {
+
+  public function __construct($assoc_owner, $name, $config) {
+
+    parent::__construct($assoc_owner, $name, $config, true);
+
+    $local_key = isset($config['local_key']) ? $config['local_key'] : 'id';
+
+    $foreign_key = isset($config['foreign_key']) ?
+      $config['foreign_key'] :
+      "{$name}_id";
+
+    $this->where(array($foreign_key => $assoc_owner->$local_key));
+
+  }
+
+}
+
+class HasManyAssociation extends Association {
+
+  public function __construct($assoc_owner, $name, $config) {
+
+    parent::__construct($assoc_owner, $name, $config, false);
+
+    $local_key = isset($config['local_key']) ? $config['local_key'] : 'id';
+
+    $foreign_key = isset($config['foreign_key']) ?
+      $config['foreign_key'] :
+      underscore($assoc_owner->get_class()) . '_id';
+
+    $this->where(array($foreign_key => $assoc_owner->$local_key));
+
+  }
+
+}
+
+class HasOneAssociation extends Association {
+
+  public function __construct($assoc_owner, $name, $config) {
+
+    parent::__construct($assoc_owner, $name, $config, true);
+
+    $local_key = isset($config['local_key']) ? $config['local_key'] : 'id';
+
+    $foreign_key = isset($config['foreign_key']) ?
+      $config['foreign_key'] :
+      underscore($assoc_owner->get_class()) . '_id';
+
+    $this->where(array($foreign_key => $assoc_owner->$local_key));
+    $this->limit(1);
+
+  }
+
+}
+
+class HasAndBelongsToManyAssociation extends Association {
+
+  public function __construct($owner, $name, $config) {
+
+    parent::__construct($owner, $name, $config, false);
+
+    # TODO : rename the config options and make them all setable
+
+    if(isset($config['join_table'])) {
+      $join_table = $config['join_table'];
+    } else {
+      $join_table = 'foo';
+    }
+
+    if(isset($config['foreign_key'])) {
+      $fk = $config['foreign_key'];
+    } else {
+      $owner_class = $owner->get_class();
+      $fk = underscore($owner_class) . '_id';
+    }
+
+    $assoc_class = $this->class;
+    $assoc_table = $assoc_class::tablename();
+    if(isset($config['association_foreign_key']))
+      $assoc_fk = $config['association_foreign_key'];
+    else
+      $assoc_join_col = underscore($assoc_class) . '_id';
+
+    $this->joins("INNER JOIN $join_table ON $join_table.$assoc_join_col = $assoc_table.id");
+    $this->where("$join_table.$fk = ?", $owner->id);
+      
+  }
+
+  public function add($obj) {
+    # insert into join table ...
+  }
+
+  public function remove($obj) {
+    # delete from join table where ... (limit 1 ??)
+  }
+
+  public function set($objects) {
+    $this->clear();
+    foreach($objects as $obj)
+      $this->add($obj);
+  }
+
+  public function ids() {
+    # select ids from join table
+  }
+
+  public function clear() {
+    # delete from join table where ...
+  }
+
+  public function is_empty() {
+    return $this->count() == 0;
+  }
+
+  #public function count() {
+  # TODO : make this work (preferably with the same name)
+  #}
+
+  public function contains($obj) {
+    # return if count of $obj->id >= 1
+  }
+
+}
+
 /**
  * @package Sculpt
  */
@@ -1000,6 +1158,8 @@ abstract class Model implements \ArrayAccess {
   static $attr_whitelist = array();
   static $attr_blacklist = array();
 
+  static $associations = array();
+
   static $scopes = array();
 
   public $errors;
@@ -1024,6 +1184,11 @@ abstract class Model implements \ArrayAccess {
       $this->set_attributes($attributes, $protect_attrs);
   }
 
+  public static function tablename() {
+    $class = get_called_class();
+    return isset($class::$table_name) ? $class::$table_name : tableize($class);
+  }
+
   public function get_class() {
     return $this->class;
   }
@@ -1041,6 +1206,8 @@ abstract class Model implements \ArrayAccess {
   }
 
   public function __get($attr_name) {
+    if($this->is_an_association($attr_name))
+      return $this->association($attr_name);
     return $this->attribute($attr_name);
   }
 
@@ -1053,6 +1220,12 @@ abstract class Model implements \ArrayAccess {
   }
 
   public function __call($method, $args) {
+
+    # check against the defined associations
+    if($this->is_an_association($method))
+      return $this->association($method);
+
+    # check against the magic method patterns for dirty tracking
     $columns = array_keys($this->table->columns);
     $regex = '/(' . implode('|', $columns) . ')_(.+)/';
     if(preg_match($regex, $method, $matches)) {
@@ -1065,7 +1238,9 @@ abstract class Model implements \ArrayAccess {
           return $this->$method($attr);
       }
     }
+
     throw new Exception("call to undefined method {$this->class}::$method()");
+
   }
 
   public function offsetExists($attr_name) {
@@ -1593,6 +1768,33 @@ abstract class Model implements \ArrayAccess {
 
   public static function count($cache = true) {
     return static::scope()->count($cache);
+  }
+
+  ## 
+  ## association methods 
+  ## 
+
+  public function is_an_association($name) {
+    $class = $this->class;
+    return isset($class::$associations[$name]);
+  }
+
+  public function association($name) {
+    $associations = $this->associations();
+    $config = $associations[$name];
+    $assoc_class = "\\Sculpt\\" . classify($config['type'] . 'Association');
+    $assoc = new $assoc_class($this, $name, $config);
+    if($assoc->is_singular())
+      return $assoc->first;
+    else
+      return $assoc;
+  }
+
+  public static function associations() {
+    $class = get_called_class();
+    if(isset($class::$associations))
+      return $class::$associations;
+    return array();
   }
 
   public static function table_name() {
