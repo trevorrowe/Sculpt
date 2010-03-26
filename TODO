@@ -1,0 +1,8 @@
+- enable custom error messages for validations
+- figure out what to do for string inflections 
+  (currently borrowing inflectors provided by pippa, perhaps i should break
+   them apart and have 3 libraries, pippa, infelctors and sculpt, sculpt
+   and pippa could both require iflectors)
+- add more validations (many are just stubs atm)
+- allow arguments to static function scopes
+- write tests :)
