@@ -97,8 +97,6 @@ class Scope {
 
       # plural terminators, operates on a collection of db records
       'all',
-      'delete_all',
-      'destroy_all',
       'each',
       'batch',
 
@@ -254,15 +252,27 @@ class Scope {
     return $record;
   }
 
-  public function delete() {
+  public function delete($id = null) {
     $scope = clone $this;
-    return $scope->limit(1)->delete_all();
+    if($id)
+      $scope->id_is($id)->limit(1);
+    return $this->table->delete($scope->sql_parts);
   }
 
-  public function destroy() {
-    $obj = $this->get();
-    $obj->destroy();
-    return $obj;
+  public function destroy($id = null) {
+
+    # destroy a single record by id
+    if($id) {
+      $obj = $this->id_is($id)->get();
+      $obj->destroy();
+      return $obj;
+    }
+
+    # or call destroy on an entire collection
+    $this->each(function($obj) {
+      $obj->destroy();
+    });
+
   }
 
 /*
@@ -283,16 +293,6 @@ class Scope {
     foreach($this->table->select($this->sql_parts, $cache) as $row)
       $objects[] = $class::hydrate($row);
     return $objects;
-  }
-
-  public function delete_all() {
-    return $this->table->delete($this->sql_parts);
-  }
-
-  public function destory_all() {
-    $this->each(function($obj) {
-      $obj->destroy();
-    });
   }
 
   public function each($callback) {

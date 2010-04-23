@@ -36,6 +36,15 @@ abstract class Column {
       case self::DECIMAL:  return (double) $value;
       case self::DATETIME:
       case self::DATE:
+
+        if(is_object($value) && get_class($value) == 'Pippa\MagicHash')
+          $value = $value->to_array();
+        if(is_array($value)) {
+          $value = sprintf("%04d-%02d-%02d %02d:%02d:%02d",
+            $value['year'], $value['month'], $value['day'],
+            $value['hour'], $value['minute'], $value['second']);
+        }
+
         if($value instanceof DateTime)
           return $value;
         if(is_numeric($value))

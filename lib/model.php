@@ -7,45 +7,42 @@ namespace Sculpt;
  */
 abstract class Model implements \ArrayAccess {
 
+  private $_class;
+  private $_attributes = array();
+  private $_changes = array();
+  private $_errors;
+
+  # klass configuration
+
   static $connection = null;
+  static $table_name = null;
 
   static $attr_accessors = array();
   static $attr_whitelist = array();
   static $attr_blacklist = array();
 
-  static $associations = array();
-
   static $scopes = array();
-
-  public $errors;
-
-  protected $class;
-  protected $table;
-
-  private $attr = array();
-  private $changes = array();
+  static $associations = array();
 
   public function __construct($attributes = null, $protect_attrs = true) {
 
-    $this->class = get_called_class();
-    $this->table = Table::get($this->class);
-    $this->errors = new Errors();
+    $this->_class = get_called_class();
+    $this->_errors = new Errors();
 
     # set default values for this object based on column defaults
-    foreach($this->table->columns as $attr_name => $column)
-      $this->attr[$attr_name] = $column->default_value();
+    foreach(static::columns() as $attr_name => $column)
+      $this->_attributes[$attr_name] = $column->default_value();
 
     if(!is_null($attributes))
       $this->set_attributes($attributes, $protect_attrs);
+
+    $this->init();
   }
 
-  public static function tablename() {
-    $class = get_called_class();
-    return isset($class::$table_name) ? $class::$table_name : tableize($class);
-  }
+  public function init() {}
 
   public function get_class() {
-    return $this->class;
+    return $this->_class;
   }
 
   public static function hydrate($attributes) {
@@ -57,13 +54,19 @@ abstract class Model implements \ArrayAccess {
   }
 
   public function is_new_record() {
-    return is_null($this->attr['id']);
+    return is_null($this->_attributes['id']);
   }
 
   public function __get($attr_name) {
+
     if($this->is_an_association($attr_name))
       return $this->association($attr_name);
+
+    if($attr_name == 'errors')
+      return $this->_errors;
+
     return $this->attribute($attr_name);
+
   }
 
   public function __set($attr_name, $attr_value) {
@@ -81,7 +84,7 @@ abstract class Model implements \ArrayAccess {
       return $this->association($method);
 
     # check against the magic method patterns for dirty tracking
-    $columns = array_keys($this->table->columns);
+    $columns = array_keys(static::columns());
     $regex = '/(' . implode('|', $columns) . ')_(.+)/';
     if(preg_match($regex, $method, $matches)) {
       $attr = $matches[1];
@@ -94,7 +97,7 @@ abstract class Model implements \ArrayAccess {
       }
     }
 
-    throw new Exception("call to undefined method {$this->class}::$method()");
+    throw new Exception("call to undefined method {$this->_class}::$method()");
 
   }
 
@@ -136,45 +139,48 @@ abstract class Model implements \ArrayAccess {
 
   protected function _get($name, $type_cast = true) {
     $this->ensure_attr_defined($name);
-    $value = isset($this->attr[$name]) ? $this->attr[$name] : null;
-    if(isset($this->table->columns[$name]) && $type_cast) {
-      $value = $this->table->columns[$name]->cast($value);
+    $columns = static::columns();
+    $value = isset($this->_attributes[$name]) ? $this->_attributes[$name] : null;
+    if(isset($columns[$name]) && $type_cast) {
+      $value = $columns[$name]->cast($value);
     }
     return $value;
   }
 
   protected function _set($name, $value) { 
+
     $this->ensure_attr_defined($name);
 
-    # dirty tracking -- track changes on db column attributes
-    $track = false;
-    if(isset($this->table->columns[$name])) {
-      $track = true;
-      $was = isset($this->changes[$name]) ? 
-        $this->changes[$name][0] : 
-        $this->attribute($name);
+    # dirty tracking
+    $trackable_attr = false;
+    $columns = static::columns();
+    if(isset($columns[$name])) {
+      # some attributes setable via _set are not persisted to the db,
+      # we don't watch for dirty changes on these
+      $trackable_attr = true;
+      $was = isset($this->_changes[$name]) ? 
+        $this->_changes[$name][0] : 
+        $this->_attributes[$name];
     }
 
-    $this->attr[$name] = $value;
+    $this->_attributes[$name] = $value;
 
-    if($track) {
-      $is = $this->attribute($name);
-      if($was !== $is)
-        $this->changes[$name] = array($was, $is);    
+    if($trackable_attr) {
+      $is = $this->_attributes[$name];
+      if($was != $is)
+        $this->_changes[$name] = array($was, $is);    
     }
   }
   
   protected function ensure_attr_defined($name) {
-    if(!isset($this->table->columns[$name]) && 
-       !in_array($name, static::$attr_accessors)) 
-    {
-      throw new UndefinedAttributeException($this->class, $name);
-    }
+    $columns = static::columns();
+    if(!isset($columns[$name]) && !in_array($name, static::$attr_accessors))
+      throw new UndefinedAttributeException($this->_class, $name);
   }
 
   public function attributes() {
     $attributes = array();
-    foreach(array_keys($this->attr) as $attr_name)
+    foreach(array_keys($this->_attributes) as $attr_name)
       $attributes[$attr_name] = $this->attribute($attr_name);
     return $attributes;
   }
@@ -218,7 +224,7 @@ abstract class Model implements \ArrayAccess {
   }
 
   private function _clear_changes() {
-    $this->changes = array();
+    $this->_changes = array();
   }
 
   public function is_changed() {
@@ -231,24 +237,24 @@ abstract class Model implements \ArrayAccess {
   }
 
   public function changed() {
-    return array_keys($this->changes);
+    return array_keys($this->_changes);
   }
 
   public function changes() {
-    return $this->changes;
+    return $this->_changes;
   }
 
   public function attr_change($attr) {
-    return isset($this->changes[$attr]) ? $this->changes[$attr] : null;
+    return isset($this->_changes[$attr]) ? $this->_changes[$attr] : null;
   }
 
   public function attr_is_changed($attr) {
-    return isset($this->changes[$attr]);
+    return isset($this->_changes[$attr]);
   }
 
   public function attr_was($attr) {
-    return isset($this->changes[$attr]) ?
-      $this->changes[$attr][0] : 
+    return isset($this->_changes[$attr]) ?
+      $this->_changes[$attr][0] : 
       $this->$attr;
   }
 
@@ -266,10 +272,22 @@ abstract class Model implements \ArrayAccess {
       throw new RecordInvalidException($this);
   }
 
-  public function create() {
-    if(!$this->is_new_record())
-      throw new Exception('create called on an existing record');
-    return $this->_create();
+  public static function build($attributes = null, $protect_attrs = true) {
+    $class = get_called_class();
+    $obj = new $class($attributes, $protect_attrs);
+    return $obj;
+  }
+
+  public static function create($attributes = null, $protect_attrs = true) {
+    $obj = static::build($attributes, $protect_attrs);
+    $obj->save();
+    return $obj;
+  }
+
+  public static function createx($attributes = null, $protect_attrs = true) {
+    $obj = static::build($attributes, $protect_attrs);
+    $obj->savex();
+    return $obj;
   }
 
   public function delete() {
@@ -291,7 +309,7 @@ abstract class Model implements \ArrayAccess {
   }
 
   private function _validate($on_create) {
-    $this->errors->clear();
+    $this->_errors->clear();
     $this->before_validate();
     if($on_create) {
       $this->before_validate_on_create();
@@ -301,14 +319,14 @@ abstract class Model implements \ArrayAccess {
       $this->validate();
     }
     $this->after_validate();
-    return $this->errors->is_empty();
+    return $this->_errors->is_empty();
   }
 
   private function _update() {
     if($this->_validate(false)) {
       $this->before_save();
       $this->before_update();
-      $this->table->update($this);
+      static::table()->update($this);
       $this->after_update();
       $this->after_save();
       $this->_clear_changes();
@@ -322,7 +340,7 @@ abstract class Model implements \ArrayAccess {
     if($this->_validate(true)) {
       $this->before_save();
       $this->before_create();
-      $this->table->insert($this);
+      static::table()->insert($this);
       $this->after_create();
       $this->after_save();
       $this->_clear_changes();
@@ -358,7 +376,7 @@ abstract class Model implements \ArrayAccess {
       $val = $this->attribute($attr);
       if($val !== true) {
         $msg = 'must be accepted';
-        $obj->errors->add($attr, $msg);
+        $obj->_errors->add($attr, $msg);
       }
     });
   }
@@ -374,7 +392,7 @@ abstract class Model implements \ArrayAccess {
          $val !== false)
       {
         $msg = 'must be a boolean';
-        $obj->errors->add($attr, $msg);
+        $obj->_errors->add($attr, $msg);
       }
     });
   }
@@ -404,7 +422,7 @@ abstract class Model implements \ArrayAccess {
       $regex = "/^$hex{8}-$hex{4}-$hex{4}-$hex{4}-$hex{12}$/";
       if(!preg_match($regex, $value)) {
         $msg = 'is not a valid UUID';
-        $obj->errors->add($attr, $msg);
+        $obj->_errors->add($attr, $msg);
       }
     });
   }
@@ -414,7 +432,7 @@ abstract class Model implements \ArrayAccess {
       $other_attr = "{$attr}_confirmation";
       if($obj->attribute($attr) !== $obj->attribute("{$attr}_confirmation")) {
         $msg = 'doesn\'t match confirmation';
-        $obj->errors->add($attr, $msg);
+        $obj->_errors->add($attr, $msg);
       }
     });
   }
@@ -440,7 +458,7 @@ abstract class Model implements \ArrayAccess {
       $val = (string) $obj->attribute_before_type_cast($attr);
       if(!preg_match($opts['regex'], $val)) {
         $msg = 'is invalid';
-        $obj->errors->add($attr, $msg);
+        $obj->_errors->add($attr, $msg);
       }
 
     });
@@ -456,7 +474,7 @@ abstract class Model implements \ArrayAccess {
         $is = $opts['is'];
         if($length != $is) {
           $msg = "is the wrong length (should be $is characters)";
-          $obj->errors->add($attr, $msg);
+          $obj->_errors->add($attr, $msg);
         }
       }
 
@@ -464,7 +482,7 @@ abstract class Model implements \ArrayAccess {
         $max = $opts['maximum'];
         if($length > $max) {
           $msg = "is too long (maximum is $max)";
-          $obj->errors->add($attr, $msg);
+          $obj->_errors->add($attr, $msg);
         }
       }
 
@@ -472,7 +490,7 @@ abstract class Model implements \ArrayAccess {
         $min = $opts['minimum'];
         if($length < $min) {
           $msg = "is too short (minimum is $min)";
-          $obj->errors->add($attr, $msg);
+          $obj->_errors->add($attr, $msg);
         }
       }
 
@@ -490,7 +508,7 @@ abstract class Model implements \ArrayAccess {
       $val = $obj->attribute_before_type_cast($attr);
       if(is_null($val) || $val === '') {
         $msg = 'may not be blank';
-        $obj->errors->add($attr, $msg);
+        $obj->_errors->add($attr, $msg);
       }
     });
   }
@@ -518,7 +536,7 @@ abstract class Model implements \ArrayAccess {
         $scope->id_is_not($obj->id);
 
       if($scope->first())
-        $obj->errors->add($attr, 'is already taken');  
+        $obj->_errors->add($attr, 'is already taken');  
 
     });
   }
@@ -630,7 +648,7 @@ abstract class Model implements \ArrayAccess {
   ## 
 
   public function is_an_association($name) {
-    $class = $this->class;
+    $class = $this->_class;
     return isset($class::$associations[$name]);
   }
 
@@ -653,11 +671,17 @@ abstract class Model implements \ArrayAccess {
   }
 
   public static function table_name() {
-    return Table::get(get_called_class())->name;
+    $class = get_called_class();
+    return isset($class::$table_name) ? $class::$table_name : tableize($class);
   }
 
   public static function columns() {
-    return Table::get(get_called_class())->columns;
+    $table = static::table();
+    return $table->columns;
+  }
+
+  public static function table() {
+    return Table::get(get_called_class());
   }
 
 }

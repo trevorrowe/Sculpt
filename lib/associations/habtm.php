@@ -39,7 +39,7 @@ class HasAndBelongsToManyAssociation extends Association {
     $this->owner_key = $owner_key;
 
     $target_class = $this->class;
-    $target_table = $target_class::tablename();
+    $target_table = $target_class::table_name();
 
     if(isset($config['target_col']) )
       $target_col = $config['target_col'];
@@ -99,16 +99,15 @@ class HasAndBelongsToManyAssociation extends Association {
     $this->connection()->execute($sql, $values);
   }
 
-  public function set($objects) {
+  public function set($objects_or_ids) {
     $this->clear();
-    foreach($objects as $obj)
-      $this->add($obj);
+    $this->add($objects_or_ids);
   }
 
   public function ids() {
-    # TODO : implment in base scope class?
-    # TODO : provide a shortcut version for basic scopes
-    throw new Exception('not implmeneted');
+    $scope = clone $this;
+    $scope->select('id');
+    return collect($scope->all(), function($record) { $record->id; });
   }
 
   public function clear() {
@@ -118,9 +117,7 @@ class HasAndBelongsToManyAssociation extends Association {
       $sth = $this->connection()->execute($sql, array($value));
       return $sth->rowCount();
     }
-    $scope = clone $this;
-    $scope->from($this->join_table);
-    return $scope->delete_all();
+    throw new Exception('habtm clear with conditions not implmented yet');
   }
 
   public function is_empty() {
@@ -145,10 +142,13 @@ class HasAndBelongsToManyAssociation extends Association {
   # TODO : this method should probably act like count where a simplifed
   # query is only used if the conditions and joins are basic
   public function contains($obj_or_key) {
-    $sql = "SELECT * FROM {$this->join_table} WHERE {$this->owner_key} = ? AND {$this->target_key} = ? LIMIT 1";
-    $values = 
-    $sth = $this->connection()->execute($sql, $this->bind_values($obj_or_key));
-    return $sth->rowCount() > 0;
+    if($this->is_basic()) {
+      $sql = "SELECT * FROM {$this->join_table} WHERE {$this->owner_key} = ? AND {$this->target_key} = ? LIMIT 1";
+      $values = 
+      $sth = $this->connection()->execute($sql, $this->bind_values($obj_or_key));
+      return $sth->rowCount() > 0;
+    }
+    throw new Exception('habtm contains with conditions not implemented yet');
   }
 
   protected function is_basic() {

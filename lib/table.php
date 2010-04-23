@@ -7,6 +7,11 @@ namespace Sculpt;
  */
 class Table {
 
+  # columns
+  # associations
+  # validations
+  # 
+
   # caching constructed Table objects, use Table::get() to access these
   private static $cache = array();
 
@@ -29,7 +34,7 @@ class Table {
 
   protected function __construct($class) {
     $this->class = $class;
-    $this->name = $class::tablename();
+    $this->name = $class::table_name();
     $this->connection = Connection::get($class::$connection);
     $this->columns = $this->connection->columns($this->name);
   }
@@ -41,7 +46,10 @@ class Table {
 
     foreach($obj->changed() as $attr) {
       $columns[] = $attr;
-      $bind_params[] = $obj->attribute($attr);
+      $value = $obj->attribute($attr);
+      if(is_object($value) && get_class($value) == 'DateTime')
+        $value = strftime('%Y-%m-%d %T', $value->getTimestamp());
+      $bind_params[] = $value;
     }
 
     $timestamp = strftime('%Y-%m-%d %T');
@@ -67,7 +75,10 @@ class Table {
     $bind_params = array();
     foreach($obj->changed() as $attr) {
       $set[] = "$attr = ?";
-      $bind_params[] = $obj->attribute($attr);
+      $value = $obj->attribute($attr);
+      if(is_object($value) && get_class($value) == 'DateTime')
+        $value = strftime('%Y-%m-%d %T', $value->getTimestamp());
+      $bind_params[] = $value;
     }
 
     if(isset($this->columns['updated_at'])) {

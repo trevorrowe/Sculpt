@@ -62,11 +62,36 @@ function is_assoc($var) {
   return is_array($var) && array_diff_key($var, array_keys(array_keys($var)));
 }
 
-function flatten_args($args) {
-  if(count($args) == 1 && is_array($args[0]))
-    return $args[0];
+/**
+ * Returns arguments as an array.  To use this method call it like:
+ * 
+ *   function some_function() {
+ *     $args = flatten_args(func_get_args());
+ *   }
+ *
+ * A few examples outputs:
+ *
+ *   some_func(1, 2, 3, 4)
+ *   #=> array(1, 2, 3, 4)
+ *
+ *   some_func(array(1, 2, 3, 4))
+ *   #=> array(1, 2, 3, 4)
+ *
+ *   some_func(array(1, 2), 3, 4)
+ *   #=> array(array(1, 2), 3, 4)
+ *
+ *  some_func()
+ *  #=> array()
+ *
+ * @param array $func_get_args the result of a call to func_get_args()
+ * @return array
+ *
+ */
+function flatten_args($func_get_args) {
+  if(count($func_get_args) == 1 && is_array($func_get_args[0]))
+    return $func_get_args[0];
   else
-    return $args;
+    return $func_get_args;
 }
 
 function collect($array, $callback) {

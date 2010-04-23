@@ -1,3 +1,13 @@
+REFACOTOR
+==========
+- class Table should on be wrapper for a single db table, not for a model.
+  Models should use a table fetching data, describing columns, etc
+  - move table insert, update, select and delete out
+
+
+
+GENERAL
+==========
 - enable custom error messages for validations
 - figure out what to do for string inflections 
   (currently borrowing inflectors provided by pippa, perhaps i should break
