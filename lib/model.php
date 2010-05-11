@@ -376,7 +376,7 @@ abstract class Model implements \ArrayAccess {
       $val = $this->attribute($attr);
       if($val !== true) {
         $msg = 'must be accepted';
-        $obj->_errors->add($attr, $msg);
+        $obj->errors->add($attr, $msg);
       }
     });
   }
@@ -392,7 +392,7 @@ abstract class Model implements \ArrayAccess {
          $val !== false)
       {
         $msg = 'must be a boolean';
-        $obj->_errors->add($attr, $msg);
+        $obj->errors->add($attr, $msg);
       }
     });
   }
@@ -422,7 +422,7 @@ abstract class Model implements \ArrayAccess {
       $regex = "/^$hex{8}-$hex{4}-$hex{4}-$hex{4}-$hex{12}$/";
       if(!preg_match($regex, $value)) {
         $msg = 'is not a valid UUID';
-        $obj->_errors->add($attr, $msg);
+        $obj->errors->add($attr, $msg);
       }
     });
   }
@@ -432,7 +432,7 @@ abstract class Model implements \ArrayAccess {
       $other_attr = "{$attr}_confirmation";
       if($obj->attribute($attr) !== $obj->attribute("{$attr}_confirmation")) {
         $msg = 'doesn\'t match confirmation';
-        $obj->_errors->add($attr, $msg);
+        $obj->errors->add($attr, $msg);
       }
     });
   }
@@ -458,7 +458,7 @@ abstract class Model implements \ArrayAccess {
       $val = (string) $obj->attribute_before_type_cast($attr);
       if(!preg_match($opts['regex'], $val)) {
         $msg = 'is invalid';
-        $obj->_errors->add($attr, $msg);
+        $obj->errors->add($attr, $msg);
       }
 
     });
@@ -474,7 +474,7 @@ abstract class Model implements \ArrayAccess {
         $is = $opts['is'];
         if($length != $is) {
           $msg = "is the wrong length (should be $is characters)";
-          $obj->_errors->add($attr, $msg);
+          $obj->errors->add($attr, $msg);
         }
       }
 
@@ -482,7 +482,7 @@ abstract class Model implements \ArrayAccess {
         $max = $opts['maximum'];
         if($length > $max) {
           $msg = "is too long (maximum is $max)";
-          $obj->_errors->add($attr, $msg);
+          $obj->errors->add($attr, $msg);
         }
       }
 
@@ -490,7 +490,7 @@ abstract class Model implements \ArrayAccess {
         $min = $opts['minimum'];
         if($length < $min) {
           $msg = "is too short (minimum is $min)";
-          $obj->_errors->add($attr, $msg);
+          $obj->errors->add($attr, $msg);
         }
       }
 
@@ -508,7 +508,7 @@ abstract class Model implements \ArrayAccess {
       $val = $obj->attribute_before_type_cast($attr);
       if(is_null($val) || $val === '') {
         $msg = 'may not be blank';
-        $obj->_errors->add($attr, $msg);
+        $obj->errors->add($attr, $msg);
       }
     });
   }
@@ -536,7 +536,7 @@ abstract class Model implements \ArrayAccess {
         $scope->id_is_not($obj->id);
 
       if($scope->first())
-        $obj->_errors->add($attr, 'is already taken');  
+        $obj->errors->add($attr, 'is already taken');  
 
     });
   }
@@ -617,14 +617,6 @@ abstract class Model implements \ArrayAccess {
 
   public static function all($cache = true) {
     return static::scope()->all($cache);
-  }
-
-  public static function delete_all() {
-    return static::scope()->delete_all();
-  }
-
-  public static function destroy_all() {
-    return static::scope()->destroy_all();
   }
 
   public static function each($callback) {
